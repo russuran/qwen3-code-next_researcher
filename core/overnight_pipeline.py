@@ -100,11 +100,9 @@ Search for:
 3. HuggingFace datasets (provide dataset ID like "org/dataset")
 4. Academic datasets with direct download links
 
-For document/passport/ID OCR, look for:
-- MIDV-500, MIDV-2019, MIDV-2020 (ID document datasets)
-- CORD, SROIE (receipt OCR datasets with similar structure)
-- FUNSD (form understanding dataset)
-- Any passport/ID card recognition datasets
+IMPORTANT: Provide DIRECT download URLs or exact Kaggle slugs that can be downloaded programmatically.
+For Kaggle, format as: kaggle datasets download -d <user/dataset>
+For HuggingFace, format as: datasets.load_dataset("<org/dataset>")
 
 Respond with ONLY a JSON object:
 {{

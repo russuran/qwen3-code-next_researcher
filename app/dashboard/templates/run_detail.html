@@ -1,113 +1,123 @@
 {% extends "base.html" %}
 {% block title %}{{ run.topic[:40] }} — Researcher{% endblock %}
+{% block nav_runs %}class="active"{% endblock %}
 {% block content %}
-<p><a href="/dashboard">&larr; All Runs</a></p>
+<p class="text-sm"><a href="/dashboard">&larr; All Runs</a></p>
 
+{# === Run Header === #}
 <div class="card">
-    <h2 style="margin-bottom: 0.5rem;">{{ run.topic }}</h2>
-    <div style="display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;">
-        <span class="badge badge-{{ run.status }}" id="run-status"
-              {% if run.status not in ('completed', 'failed', 'cancelled') %}
-              hx-get="/dashboard/runs/{{ run.id }}/status-badge" hx-trigger="every 3s" hx-swap="outerHTML"
-              {% endif %}>
-            {{ run.status }}
-        </span>
-        {% if run.started_at %}
-        <span style="color: #64748b; font-size: 0.85rem;">Started: {{ run.started_at.strftime('%H:%M:%S') }}</span>
-        {% endif %}
-        {% if run.finished_at and run.started_at %}
-        <span style="color: #64748b; font-size: 0.85rem;">Duration: {{ ((run.finished_at - run.started_at).total_seconds() / 60) | round(1) }}m</span>
-        {% endif %}
-        {% if run.status not in ('completed', 'failed', 'cancelled') %}
-        <button class="btn btn-danger" hx-post="/dashboard/runs/{{ run.id }}/cancel" hx-swap="none" style="padding: 0.25rem 0.75rem; font-size: 0.8rem;">Cancel</button>
+    <div class="flex items-center justify-between flex-wrap" style="gap: 0.75rem;">
+        <div style="flex: 1;">
+            <h2 style="margin-bottom: 0.25rem; color: var(--text-bright);">{{ run.topic[:100] }}</h2>
+            <div class="flex items-center gap-1 flex-wrap">
+                <span class="badge badge-{{ run.status }}" id="run-status"
+                      {% if run.status not in ('completed', 'failed', 'cancelled') %}
+                      hx-get="/dashboard/runs/{{ run.id }}/status-badge" hx-trigger="every 3s" hx-swap="outerHTML"
+                      {% endif %}>{{ run.status }}</span>
+                {% if run.started_at %}
+                <span class="text-xs text-muted">{{ run.started_at.strftime('%H:%M:%S') }}</span>
+                {% endif %}
+                {% if run.finished_at and run.started_at %}
+                <span class="text-xs text-muted">{{ ((run.finished_at - run.started_at).total_seconds() / 60) | round(1) }}m</span>
+                {% endif %}
+                {% if run.status not in ('completed', 'failed', 'cancelled') %}
+                <button class="btn btn-danger btn-sm" hx-post="/dashboard/runs/{{ run.id }}/cancel" hx-swap="none">Cancel</button>
+                {% endif %}
+            </div>
+        </div>
+        {% if run.status == 'completed' and run.output_dir %}
+        <button class="btn btn-purple btn-sm" hx-post="/dashboard/runs/{{ run.id }}/execute-hypotheses" hx-target="#impl-status" hx-swap="innerHTML">Execute Hypotheses</button>
         {% endif %}
     </div>
     {% if run.error %}
-    <div style="margin-top: 0.75rem; padding: 0.5rem; background: #450a0a; border: 1px solid #991b1b; border-radius: 0.375rem; font-size: 0.85rem;">{{ run.error }}</div>
+    <div class="mt-1" style="padding: 0.5rem; background: #450a0a; border: 1px solid var(--red); border-radius: 0.375rem; font-size: 0.85rem;">{{ run.error }}</div>
     {% endif %}
+    {% if run.output_dir %}
+    <div class="mt-1 text-xs text-muted">Output: <code>{{ run.output_dir }}</code></div>
+    {% endif %}
+    <div id="impl-status" class="mt-1"></div>
 </div>
 
-{# Live activity indicator #}
+{# === Live Activity === #}
 {% if run.status not in ('completed', 'failed', 'cancelled') %}
-<div class="card" id="current-activity"
+<div class="card flex items-center" id="current-activity" style="border-color: #22c55e;"
      hx-get="/dashboard/runs/{{ run.id }}/current-activity" hx-trigger="every 2s" hx-swap="innerHTML">
-    <div class="activity-pulse"></div>
-    <span style="color: #94a3b8;">Starting...</span>
+    <div class="pulse" style="background: #22c55e;"></div>
+    <span class="text-dim">Starting...</span>
 </div>
 {% endif %}
 
-{# Quality Metrics #}
+{# === Upload Data (when agent needs it) === #}
+{% if run.status not in ('completed', 'failed', 'cancelled') or (run.output_dir and 'overnight' in (run.topic or '')) %}
+<div class="card">
+    <div class="card-header">
+        <h2>Upload Data for This Run</h2>
+    </div>
+    <p class="text-xs text-muted mt-1">Agent needs real data for benchmarking. Drop files or a ZIP archive here.</p>
+    <form hx-post="/dashboard/runs/{{ run.id }}/upload-data" hx-target="#run-upload-status" hx-swap="innerHTML" hx-encoding="multipart/form-data">
+        <div class="drop-zone mt-1" id="run-drop-zone" onclick="document.getElementById('run-file-input').click()">
+            <div id="run-drop-text">+ Drop files here (images, ZIP, JSON)</div>
+            <input type="file" name="files" id="run-file-input" multiple accept=".zip,.jpg,.jpeg,.png,.json,.txt,.pdf" style="display: none;" onchange="runUpdateFiles(this)">
+        </div>
+        <div id="run-file-list" class="text-xs text-muted mt-1"></div>
+        <button class="btn btn-sm mt-1" type="submit">Upload</button>
+    </form>
+    <div id="run-upload-status" class="mt-1"></div>
+</div>
+<script>
+const rdz = document.getElementById('run-drop-zone');
+if (rdz) {
+    rdz.addEventListener('dragover', e => { e.preventDefault(); rdz.classList.add('dragover'); });
+    rdz.addEventListener('dragleave', () => rdz.classList.remove('dragover'));
+    rdz.addEventListener('drop', e => { e.preventDefault(); rdz.classList.remove('dragover'); document.getElementById('run-file-input').files = e.dataTransfer.files; runUpdateFiles(document.getElementById('run-file-input')); });
+}
+function runUpdateFiles(input) {
+    const files = Array.from(input.files);
+    document.getElementById('run-file-list').innerHTML = files.map(f => f.name + ' (' + (f.size/1024).toFixed(1) + ' KB)').join(', ');
+    document.getElementById('run-drop-text').textContent = files.length + ' file(s) selected';
+}
+</script>
+{% endif %}
+
+{# === Quality Metrics === #}
 {% if metrics %}
 <div class="card">
-    <h2>Quality Metrics</h2>
-    <div style="margin-top: 0.5rem; display: flex; flex-wrap: wrap; gap: 1.5rem;">
+    <h2>Quality</h2>
+    <div class="metrics-row">
         <span class="metric"><span class="metric-value">{{ (metrics.overall * 100) | round(1) }}%</span><br><span class="metric-label">Overall</span></span>
         <span class="metric"><span class="metric-value">{{ (metrics.coverage * 100) | round(1) }}%</span><br><span class="metric-label">Coverage</span></span>
-        <span class="metric"><span class="metric-value">{{ (metrics.groundedness * 100) | round(1) }}%</span><br><span class="metric-label">Groundedness</span></span>
+        <span class="metric"><span class="metric-value">{{ (metrics.groundedness * 100) | round(1) }}%</span><br><span class="metric-label">Grounded</span></span>
         <span class="metric"><span class="metric-value">{{ (metrics.source_diversity * 100) | round(1) }}%</span><br><span class="metric-label">Diversity</span></span>
         <span class="metric"><span class="metric-value">{{ (metrics.code_presence * 100) | round(1) }}%</span><br><span class="metric-label">Code</span></span>
         {% if metrics.sources_registered is defined %}
         <span class="metric"><span class="metric-value">{{ metrics.sources_registered }}</span><br><span class="metric-label">Sources</span></span>
         {% endif %}
-        {% if metrics.documents_stored is defined %}
-        <span class="metric"><span class="metric-value">{{ metrics.documents_stored }}</span><br><span class="metric-label">Docs</span></span>
-        {% endif %}
     </div>
 </div>
 {% endif %}
 
-{# Hypothesis Execution #}
-{% if run.status == 'completed' and run.output_dir %}
-<div class="card">
-    <div style="display: flex; justify-content: space-between; align-items: center;">
-        <div>
-            <h2>Implement Hypotheses</h2>
-            <p style="color: #64748b; font-size: 0.85rem; margin-top: 0.25rem;">Auto-generate code, run tests, and create PRs from research hypotheses</p>
-        </div>
-        <button class="btn"
-                hx-post="/dashboard/runs/{{ run.id }}/execute-hypotheses"
-                hx-target="#impl-status"
-                hx-swap="innerHTML"
-                hx-indicator="#impl-spinner">
-            Execute Hypotheses
-        </button>
-        <span id="impl-spinner" class="htmx-indicator" style="color: #94a3b8;">Running...</span>
-    </div>
-    <div id="impl-status" style="margin-top: 0.5rem;"></div>
-</div>
-{% endif %}
-
-{# Artifacts / Downloads #}
+{# === Artifacts === #}
 {% if artifacts %}
 <div class="card">
-    <div style="display: flex; justify-content: space-between; align-items: center;">
+    <div class="card-header">
         <h2>Artifacts</h2>
-        <a href="/dashboard/runs/{{ run.id }}/download-all" class="btn" style="font-size: 0.8rem; padding: 0.3rem 0.75rem;">Download All (ZIP)</a>
+        <a href="/dashboard/runs/{{ run.id }}/download-all" class="btn btn-outline btn-sm">Download All (ZIP)</a>
     </div>
-    <table style="margin-top: 0.5rem;">
-        <thead>
-            <tr><th>File</th><th>Phase</th><th>Size</th><th></th></tr>
-        </thead>
+    <table>
+        <thead><tr><th>File</th><th>Phase</th><th>Size</th><th></th></tr></thead>
         <tbody>
             {% for a in artifacts %}
             <tr>
                 <td>
-                    {% if not a.filename.endswith('/') %}
-                    <a href="/dashboard/runs/{{ run.id }}/view/{{ a.filename }}" style="color: #e2e8f0; font-weight: 500;">{{ a.label }}</a>
-                    {% else %}
-                    <span style="color: #e2e8f0;">{{ a.label }}</span>
-                    {% endif %}
-                    <span style="color: #475569; font-size: 0.75rem; margin-left: 0.5rem;">{{ a.filename }}</span>
+                    {% if not a.filename.endswith('/') %}<a href="/dashboard/runs/{{ run.id }}/view/{{ a.filename }}">{{ a.label }}</a>
+                    {% else %}{{ a.label }}{% endif %}
+                    <span class="text-xs text-muted" style="margin-left: 0.4rem;">{{ a.filename }}</span>
                 </td>
-                <td><span class="badge badge-{{ a.phase }}ing" style="font-size: 0.7rem;">{{ a.phase }}</span></td>
-                <td style="color: #64748b; font-size: 0.85rem;">
-                    {% if a.size > 1024 %}{{ (a.size / 1024) | round(1) }} KB{% else %}{{ a.size }} B{% endif %}
-                </td>
+                <td><span class="badge badge-{{ a.phase }}ing">{{ a.phase }}</span></td>
+                <td class="text-sm text-muted">{% if a.size > 1024 %}{{ (a.size / 1024) | round(1) }} KB{% else %}{{ a.size }} B{% endif %}</td>
                 <td style="white-space: nowrap;">
-                    {% if not a.filename.endswith('/') %}
-                    <a href="/dashboard/runs/{{ run.id }}/view/{{ a.filename }}" style="font-size: 0.85rem; margin-right: 0.75rem;">View</a>
-                    {% endif %}
-                    <a href="{{ a.download_url }}" style="font-size: 0.85rem;">Download</a>
+                    {% if not a.filename.endswith('/') %}<a href="/dashboard/runs/{{ run.id }}/view/{{ a.filename }}" class="text-sm" style="margin-right: 0.5rem;">View</a>{% endif %}
+                    <a href="{{ a.download_url }}" class="text-sm">Download</a>
                 </td>
             </tr>
             {% endfor %}
@@ -116,92 +126,51 @@
 </div>
 {% endif %}
 
-{# Phase Logs (collapsible) #}
+{# === Phase Logs === #}
 {% if phase_events %}
 <div class="card">
     <h2>Phase Logs</h2>
-    <div style="display: flex; gap: 0.5rem; margin: 0.75rem 0;">
+    <div class="tabs">
         {% for phase_name in ['plan', 'search', 'analyze', 'synthesize'] %}
         {% if phase_name in phase_events %}
-        <button class="phase-tab {% if loop.first %}active{% endif %}"
-                onclick="showPhaseLog('{{ phase_name }}', this)"
+        <button class="tab {% if loop.first %}active{% endif %}"
+                onclick="this.parentElement.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));this.classList.add('active')"
                 hx-get="/dashboard/runs/{{ run.id }}/phase-log/{{ phase_name }}" hx-target="#phase-log-content" hx-swap="innerHTML"
                 {% if loop.first %}hx-trigger="load"{% endif %}>
-            <span class="phase-dot" style="background: {{ {'plan':'#a78bfa','search':'#38bdf8','analyze':'#fb923c','synthesize':'#22c55e'}[phase_name] }};"></span>
+            <span class="tab-dot" style="background: {{ {'plan':'#a78bfa','search':'#38bdf8','analyze':'#fb923c','synthesize':'#22c55e'}[phase_name] }};"></span>
             {{ phase_name | capitalize }} ({{ phase_events[phase_name] | length }})
         </button>
         {% endif %}
         {% endfor %}
     </div>
-    <div id="phase-log-content" class="events-list" style="max-height: 400px;">
-        Loading...
-    </div>
+    <div id="phase-log-content" class="events-list" style="max-height: 350px;">Loading...</div>
 </div>
 {% endif %}
 
-{# Full Event Stream #}
+{# === Full Event Stream === #}
 <div class="card">
-    <div style="display: flex; justify-content: space-between; align-items: center;">
-        <h2>Full Event Stream <span style="font-size: 0.8rem; color: #64748b;">({{ events | length }})</span></h2>
-    </div>
+    <h2>Event Stream <span class="text-xs text-muted">({{ events | length }})</span></h2>
     <div id="events-list" class="events-list"
          {% if run.status not in ('completed', 'failed', 'cancelled') %}
          hx-get="/dashboard/runs/{{ run.id }}/events-partial" hx-trigger="every 2s" hx-swap="innerHTML"
          {% endif %}>
         {% for e in events %}
         <div class="event-item" data-phase="{{ e.phase }}">
-            <div class="event-header">
-                <span class="event-phase phase-{{ e.phase }}">[{{ e.phase }}]</span>
-                <span class="event-action">{{ e.action }}</span>
-                <span class="event-time">{{ e.created_at.strftime('%H:%M:%S') if e.created_at else '' }}</span>
+            <div class="flex items-center gap-1">
+                <span style="color: {{ {'plan':'#a78bfa','search':'#38bdf8','analyze':'#fb923c','synthesize':'#22c55e'}.get(e.phase,'#94a3b8') }}; font-weight: 700; font-size: 0.78rem;">[{{ e.phase }}]</span>
+                <span class="text-sm">{{ e.action }}</span>
+                {% if e.tool_name %}<span class="text-xs" style="color: #a78bfa;">&gt; {{ e.tool_name }}</span>{% endif %}
+                <span class="text-xs text-muted mono" style="margin-left: auto;">{{ e.created_at.strftime('%H:%M:%S') if e.created_at else '' }}</span>
             </div>
-            {% if e.tool_name %}
-            <div class="event-tool"><span class="tool-icon">&gt;</span> {{ e.tool_name }}</div>
-            {% endif %}
-            {% if e.result_summary %}
-            <div class="event-summary">{{ e.result_summary[:150] }}</div>
-            {% endif %}
+            {% if e.result_summary %}<div class="text-xs text-dim" style="padding-left: 1rem;">{{ e.result_summary[:150] }}</div>{% endif %}
         </div>
         {% endfor %}
-        {% if not events %}
-        <div style="color: #64748b; padding: 1rem;">Waiting for events...</div>
-        {% endif %}
+        {% if not events %}<div class="text-dim" style="padding: 1rem;">Waiting for events...</div>{% endif %}
     </div>
 </div>
 
-<style>
-    .activity-pulse { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #22c55e; margin-right: 0.5rem; animation: pulse 1.5s infinite; }
-    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
-    #current-activity { display: flex; align-items: center; border-color: #22c55e; }
-    .event-item { padding: 0.5rem 0; border-bottom: 1px solid #1e293b; }
-    .event-item:last-child { border-bottom: none; }
-    .event-header { display: flex; align-items: center; gap: 0.5rem; }
-    .event-time { margin-left: auto; font-size: 0.75rem; color: #475569; font-family: monospace; }
-    .event-phase { font-weight: 700; font-size: 0.8rem; }
-    .phase-plan { color: #a78bfa; }
-    .phase-search { color: #38bdf8; }
-    .phase-analyze { color: #fb923c; }
-    .phase-synthesize { color: #22c55e; }
-    .event-action { color: #e2e8f0; font-size: 0.85rem; }
-    .event-tool { margin-top: 0.2rem; font-size: 0.8rem; color: #a78bfa; padding-left: 1rem; }
-    .tool-icon { font-size: 0.7rem; }
-    .event-summary { margin-top: 0.2rem; font-size: 0.8rem; color: #94a3b8; padding-left: 1rem; word-break: break-word; }
-    .events-list { max-height: 500px; overflow-y: auto; }
-    .phase-tab { background: #1e293b; color: #94a3b8; border: 1px solid #334155; padding: 0.4rem 0.75rem; border-radius: 0.375rem; cursor: pointer; font-size: 0.8rem; display: flex; align-items: center; gap: 0.4rem; }
-    .phase-tab:hover, .phase-tab.active { background: #334155; color: #e2e8f0; border-color: #475569; }
-    .phase-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; }
-</style>
-
 <script>
-function showPhaseLog(phase, btn) {
-    document.querySelectorAll('.phase-tab').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-}
-// Auto-scroll events
-const observer = new MutationObserver(() => {
-    const el = document.getElementById('events-list');
-    if (el) el.scrollTop = el.scrollHeight;
-});
+const observer = new MutationObserver(() => { const el = document.getElementById('events-list'); if (el) el.scrollTop = el.scrollHeight; });
 const el = document.getElementById('events-list');
 if (el) observer.observe(el, { childList: true, subtree: true });
 </script>

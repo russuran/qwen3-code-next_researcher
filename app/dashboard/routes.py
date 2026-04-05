@@ -401,6 +401,48 @@ async def cancel_run_dashboard(request: Request, run_id: str, db: AsyncSession =
     return _render("runs_table.html", runs=runs)
 
 
+@router.post("/runs/{run_id}/upload-data", response_class=HTMLResponse)
+async def upload_run_data(request: Request, run_id: str, db: AsyncSession = Depends(get_db)):
+    """Upload data files directly to a run's workspace."""
+    try:
+        uid = UUID(run_id)
+    except ValueError:
+        return HTMLResponse("Invalid ID", status_code=400)
+
+    run = await db.get(Run, uid)
+    if not run:
+        return HTMLResponse("Run not found", status_code=404)
+
+    form = await request.form()
+    files = form.getlist("files")
+
+    # Save to run's output dir or workspace
+    dest = Path(run.output_dir or f"workspace/run-{run_id[:8]}") / "user_data"
+    dest.mkdir(parents=True, exist_ok=True)
+
+    count = 0
+    for file in files:
+        if not hasattr(file, 'filename') or not file.filename:
+            continue
+        content = await file.read()
+        fname = file.filename
+
+        if fname.endswith(".zip"):
+            import zipfile as zf
+            import io
+            with zf.ZipFile(io.BytesIO(content)) as z:
+                z.extractall(dest)
+                count += len(z.namelist())
+        else:
+            (dest / fname).write_bytes(content)
+            count += 1
+
+    return HTMLResponse(
+        f'<div style="padding: 0.5rem; background: #052e16; border: 1px solid var(--green); border-radius: 0.375rem;" class="text-sm">'
+        f'Uploaded {count} files to <code>{dest}</code></div>'
+    )
+
+
 @router.post("/runs/{run_id}/execute-hypotheses", response_class=HTMLResponse)
 async def execute_hypotheses_dashboard(
     request: Request, run_id: str,

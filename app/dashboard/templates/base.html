@@ -6,51 +6,130 @@
     <title>{% block title %}Researcher{% endblock %}</title>
     <script src="https://unpkg.com/htmx.org@1.9.12"></script>
     <style>
+        :root {
+            --bg: #0f172a; --bg-card: #1e293b; --bg-input: #0f172a;
+            --border: #334155; --border-hover: #475569;
+            --text: #e2e8f0; --text-dim: #94a3b8; --text-muted: #64748b; --text-bright: #f1f5f9;
+            --accent: #2563eb; --accent-hover: #1d4ed8;
+            --green: #166534; --green-text: #bbf7d0;
+            --red: #991b1b; --red-text: #fecaca;
+            --purple: #7c3aed; --purple-bg: #2e1065;
+        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0f172a; color: #e2e8f0; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg); color: var(--text); }
         .container { max-width: 1200px; margin: 0 auto; padding: 1rem; }
-        header { background: #1e293b; padding: 1rem 0; border-bottom: 1px solid #334155; margin-bottom: 1.5rem; }
+
+        /* Header */
+        header { background: var(--bg-card); border-bottom: 1px solid var(--border); padding: 0.75rem 0; margin-bottom: 1.5rem; }
         header .container { display: flex; justify-content: space-between; align-items: center; }
-        h1 { font-size: 1.5rem; color: #38bdf8; }
-        h2 { font-size: 1.25rem; margin-bottom: 1rem; color: #94a3b8; }
+        .logo { font-size: 1.25rem; font-weight: 700; color: #38bdf8; text-decoration: none; }
+        nav { display: flex; gap: 1.5rem; }
+        nav a { color: var(--text-dim); text-decoration: none; font-size: 0.9rem; padding: 0.25rem 0; border-bottom: 2px solid transparent; }
+        nav a:hover, nav a.active { color: var(--text); border-color: var(--accent); }
+
+        /* Layout */
+        .page-grid { display: grid; grid-template-columns: 1fr; gap: 1rem; }
+        @media (min-width: 900px) { .two-col { grid-template-columns: 1fr 1fr; } }
+        h2 { font-size: 1.1rem; color: var(--text-dim); margin-bottom: 0.75rem; }
         a { color: #38bdf8; text-decoration: none; }
         a:hover { text-decoration: underline; }
-        .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 9999px; font-size: 0.75rem; font-weight: 600; }
+
+        /* Cards */
+        .card { background: var(--bg-card); border: 1px solid var(--border); border-radius: 0.5rem; padding: 1rem; margin-bottom: 1rem; }
+        .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem; }
+
+        /* Badges */
+        .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 9999px; font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; }
         .badge-pending { background: #475569; color: #cbd5e1; }
-        .badge-planning, .badge-searching, .badge-analyzing, .badge-synthesizing { background: #1d4ed8; color: #bfdbfe; }
-        .badge-completed { background: #166534; color: #bbf7d0; }
-        .badge-failed { background: #991b1b; color: #fecaca; }
+        .badge-planning, .badge-searching, .badge-analyzing, .badge-synthesizing { background: #1e3a5f; color: #93c5fd; }
+        .badge-completed { background: var(--green); color: var(--green-text); }
+        .badge-failed { background: var(--red); color: var(--red-text); }
         .badge-cancelled { background: #78350f; color: #fde68a; }
-        .card { background: #1e293b; border: 1px solid #334155; border-radius: 0.5rem; padding: 1rem; margin-bottom: 1rem; }
-        .card:hover { border-color: #475569; }
+
+        /* Table */
         table { width: 100%; border-collapse: collapse; }
-        th, td { text-align: left; padding: 0.75rem; border-bottom: 1px solid #334155; }
-        th { color: #94a3b8; font-weight: 500; font-size: 0.85rem; text-transform: uppercase; letter-spacing: 0.05em; }
-        .btn { display: inline-block; padding: 0.5rem 1rem; background: #2563eb; color: white; border: none; border-radius: 0.375rem; cursor: pointer; font-size: 0.875rem; }
-        .btn:hover { background: #1d4ed8; }
+        th, td { text-align: left; padding: 0.6rem 0.75rem; border-bottom: 1px solid var(--border); font-size: 0.875rem; }
+        th { color: var(--text-muted); font-weight: 500; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; }
+        tr:hover td { background: rgba(255,255,255,0.02); }
+
+        /* Buttons */
+        .btn { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.45rem 0.9rem; background: var(--accent); color: white; border: none; border-radius: 0.375rem; cursor: pointer; font-size: 0.825rem; font-weight: 500; }
+        .btn:hover { background: var(--accent-hover); text-decoration: none; }
+        .btn-sm { padding: 0.3rem 0.6rem; font-size: 0.75rem; }
         .btn-danger { background: #dc2626; }
         .btn-danger:hover { background: #b91c1c; }
-        input[type="text"] { width: 100%; padding: 0.5rem; background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; font-size: 0.875rem; }
-        input[type="text"]:focus { outline: none; border-color: #2563eb; }
-        .events-list { max-height: 400px; overflow-y: auto; font-family: 'SF Mono', monospace; font-size: 0.8rem; }
-        .event-item { padding: 0.35rem 0; border-bottom: 1px solid #1e293b; }
-        .event-phase { color: #38bdf8; font-weight: 600; }
-        .event-action { color: #94a3b8; }
-        .event-summary { color: #cbd5e1; }
-        .metric { display: inline-block; margin-right: 1rem; }
-        .metric-value { font-size: 1.25rem; font-weight: 700; color: #38bdf8; }
-        .metric-label { font-size: 0.75rem; color: #64748b; }
-        .form-row { display: flex; gap: 0.5rem; margin-bottom: 1rem; }
-        .form-row input { flex: 1; }
+        .btn-purple { background: var(--purple); }
+        .btn-purple:hover { background: #6d28d9; }
+        .btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text-dim); }
+        .btn-outline:hover { border-color: var(--text-dim); color: var(--text); }
+
+        /* Forms */
+        input[type="text"], input[type="number"], textarea, select {
+            padding: 0.45rem 0.6rem; background: var(--bg-input); border: 1px solid var(--border);
+            border-radius: 0.375rem; color: var(--text); font-size: 0.85rem; font-family: inherit;
+        }
+        input:focus, textarea:focus, select:focus { outline: none; border-color: var(--accent); }
+        .form-label { display: block; font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.2rem; }
+        .form-row { display: flex; gap: 0.5rem; margin-bottom: 0.75rem; }
+
+        /* Checkbox groups */
+        .check-group { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-top: 0.2rem; }
+        .check-item { display: inline-flex; align-items: center; gap: 0.25rem; background: var(--bg-card); border: 1px solid var(--border); padding: 0.25rem 0.5rem; border-radius: 0.25rem; font-size: 0.78rem; color: var(--text-dim); cursor: pointer; user-select: none; }
+        .check-item:hover { border-color: var(--border-hover); }
+        .check-item input { accent-color: var(--accent); }
+
+        /* Metrics */
+        .metrics-row { display: flex; flex-wrap: wrap; gap: 1.25rem; margin-top: 0.5rem; }
+        .metric { text-align: center; }
+        .metric-value { font-size: 1.2rem; font-weight: 700; color: #38bdf8; }
+        .metric-label { font-size: 0.7rem; color: var(--text-muted); }
+
+        /* Events */
+        .events-list { max-height: 450px; overflow-y: auto; font-size: 0.8rem; }
+        .event-item { padding: 0.4rem 0; border-bottom: 1px solid rgba(255,255,255,0.03); }
+
+        /* Activity */
+        .pulse { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 0.4rem; animation: pulse 1.5s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
+        /* Tabs */
+        .tabs { display: flex; gap: 0.4rem; margin-bottom: 0.75rem; }
+        .tab { background: var(--bg-card); border: 1px solid var(--border); padding: 0.35rem 0.65rem; border-radius: 0.25rem; font-size: 0.78rem; color: var(--text-dim); cursor: pointer; display: flex; align-items: center; gap: 0.3rem; }
+        .tab:hover, .tab.active { background: var(--border); color: var(--text); }
+        .tab-dot { width: 6px; height: 6px; border-radius: 50%; }
+
+        /* Drop zone */
+        .drop-zone { border: 2px dashed var(--border); border-radius: 0.5rem; padding: 2rem; text-align: center; color: var(--text-muted); cursor: pointer; transition: border-color 0.2s; }
+        .drop-zone:hover, .drop-zone.dragover { border-color: var(--accent); color: var(--text-dim); }
+
+        /* Utilities */
+        .hidden { display: none; }
+        .text-sm { font-size: 0.85rem; }
+        .text-xs { font-size: 0.75rem; }
+        .text-dim { color: var(--text-dim); }
+        .text-muted { color: var(--text-muted); }
+        .mono { font-family: 'SF Mono', 'Fira Code', monospace; }
+        .mt-1 { margin-top: 0.5rem; }
+        .mt-2 { margin-top: 0.75rem; }
+        .gap-1 { gap: 0.5rem; }
+        .flex { display: flex; }
+        .items-center { align-items: center; }
+        .justify-between { justify-content: space-between; }
+        .flex-wrap { flex-wrap: wrap; }
         .htmx-indicator { display: none; }
         .htmx-request .htmx-indicator { display: inline; }
+        code { background: var(--bg); padding: 0.1rem 0.3rem; border-radius: 0.2rem; font-size: 0.85em; }
     </style>
 </head>
 <body>
     <header>
         <div class="container">
-            <h1>Researcher</h1>
-            <nav style="display: flex; gap: 1.5rem;"><a href="/dashboard">Runs</a><a href="/dashboard/upload-dataset">Datasets</a></nav>
+            <a href="/dashboard" class="logo">Researcher</a>
+            <nav>
+                <a href="/dashboard" {% block nav_runs %}{% endblock %}>Runs</a>
+                <a href="/dashboard/upload-dataset" {% block nav_datasets %}{% endblock %}>Datasets</a>
+                <a href="http://localhost:8000/docs" target="_blank">API Docs</a>
+            </nav>
         </div>
     </header>
     <div class="container">
