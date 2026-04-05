@@ -6,6 +6,7 @@ from sqlalchemy import (
     BigInteger,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     String,
@@ -57,7 +58,7 @@ class Event(Base):
     tool_input = Column(JSONB)
     result_summary = Column(Text, default="")
     latency_ms = Column(BigInteger)
-    cost_estimate = Column(String(20))
+    cost_estimate = Column(Float)
     parent_event_id = Column(BigInteger)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text("now()"))
 
