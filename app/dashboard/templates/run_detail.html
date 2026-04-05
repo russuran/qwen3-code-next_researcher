@@ -56,6 +56,27 @@
 </div>
 {% endif %}
 
+{# Hypothesis Execution #}
+{% if run.status == 'completed' and run.output_dir %}
+<div class="card">
+    <div style="display: flex; justify-content: space-between; align-items: center;">
+        <div>
+            <h2>Implement Hypotheses</h2>
+            <p style="color: #64748b; font-size: 0.85rem; margin-top: 0.25rem;">Auto-generate code, run tests, and create PRs from research hypotheses</p>
+        </div>
+        <button class="btn"
+                hx-post="/dashboard/runs/{{ run.id }}/execute-hypotheses"
+                hx-target="#impl-status"
+                hx-swap="innerHTML"
+                hx-indicator="#impl-spinner">
+            Execute Hypotheses
+        </button>
+        <span id="impl-spinner" class="htmx-indicator" style="color: #94a3b8;">Running...</span>
+    </div>
+    <div id="impl-status" style="margin-top: 0.5rem;"></div>
+</div>
+{% endif %}
+
 {# Artifacts / Downloads #}
 {% if artifacts %}
 <div class="card">

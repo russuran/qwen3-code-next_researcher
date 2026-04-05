@@ -301,6 +301,41 @@ async def cancel_run_dashboard(request: Request, run_id: str, db: AsyncSession =
     return _render("runs_table.html", runs=runs)
 
 
+@router.post("/runs/{run_id}/execute-hypotheses", response_class=HTMLResponse)
+async def execute_hypotheses_dashboard(
+    request: Request, run_id: str,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    """Trigger hypothesis implementation loop from dashboard."""
+    import httpx as httpx_client
+    try:
+        async with httpx_client.AsyncClient() as client:
+            resp = await client.post(
+                f"http://localhost:8000/hypotheses/{run_id}/execute",
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                impl_id = data.get("implementation_run_id", "")
+                count = data.get("hypotheses_count", 0)
+                return HTMLResponse(
+                    f'<div style="padding: 0.5rem; background: #1e3a5f; border: 1px solid #2563eb; border-radius: 0.375rem;">'
+                    f'Started implementation of {count} hypotheses. '
+                    f'<a href="/dashboard/runs/{impl_id}" style="color: #38bdf8;">View progress</a>'
+                    f'</div>'
+                )
+            else:
+                detail = resp.json().get("detail", resp.text[:200]) if resp.headers.get("content-type", "").startswith("application/json") else resp.text[:200]
+                return HTMLResponse(
+                    f'<div style="padding: 0.5rem; background: #450a0a; border: 1px solid #991b1b; border-radius: 0.375rem;">{detail}</div>'
+                )
+    except Exception as e:
+        return HTMLResponse(
+            f'<div style="padding: 0.5rem; background: #450a0a; border: 1px solid #991b1b; border-radius: 0.375rem;">Error: {str(e)[:200]}</div>'
+        )
+
+
 # ---------------------------------------------------------------------------
 # File viewer
 # ---------------------------------------------------------------------------
