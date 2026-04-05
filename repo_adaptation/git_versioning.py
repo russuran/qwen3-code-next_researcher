@@ -23,8 +23,10 @@ class GitVersioning:
         if git_dir.exists():
             return False
         self._run("init")
+        self._run("config", "user.email", "ai-researcher@local")
+        self._run("config", "user.name", "AI Researcher")
         self._run("add", "-A")
-        self._run("commit", "-m", "Initial commit (auto-generated)")
+        self._run("commit", "-m", "Initial commit (auto-generated)", "--allow-empty")
         logger.info("Initialized git repo at %s", self.repo_path)
         return True
 

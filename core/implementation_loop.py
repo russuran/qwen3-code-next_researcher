@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -166,7 +167,7 @@ class ImplementationLoop:
             logger.info("Running tests for: %s", hyp.title)
             oracle = TestOracle(project_dir)
             test_result = oracle.run_tests(
-                command=["python", "-m", "pytest", "test_implementation.py", "-v", "--tb=short"],
+                command=[sys.executable, "-m", "pytest", "test_implementation.py", "-v", "--tb=short"],
                 timeout=120,
             )
             result.test_result = test_result.model_dump()

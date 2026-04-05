@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import sys
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -31,10 +32,10 @@ class TestOracle:
         if (self.repo_path / "pyproject.toml").exists():
             content = (self.repo_path / "pyproject.toml").read_text(errors="ignore")
             if "pytest" in content:
-                return ["python", "-m", "pytest", "-v", "--tb=short"]
+                return [sys.executable, "-m", "pytest", "-v", "--tb=short"]
 
         if (self.repo_path / "pytest.ini").exists() or (self.repo_path / "setup.cfg").exists():
-            return ["python", "-m", "pytest", "-v", "--tb=short"]
+            return [sys.executable, "-m", "pytest", "-v", "--tb=short"]
 
         if (self.repo_path / "Makefile").exists():
             content = (self.repo_path / "Makefile").read_text(errors="ignore")
@@ -45,7 +46,7 @@ class TestOracle:
             return ["npm", "test"]
 
         # Default: pytest
-        return ["python", "-m", "pytest", "-v", "--tb=short"]
+        return [sys.executable, "-m", "pytest", "-v", "--tb=short"]
 
     def run_tests(self, command: list[str] | None = None, timeout: int = 300) -> TestResult:
         cmd = command or self.detect_test_command()
