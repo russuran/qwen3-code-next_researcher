@@ -98,6 +98,59 @@ Use Levenshtein distance for CER (implement inline if python-Levenshtein not ava
 Output ONLY Python code in ```python ... ```
 """
 
+DATASET_SEARCH_PROMPT = """\
+You are a data engineer. Find real, downloadable datasets for: {task}
+
+Search for:
+1. Kaggle datasets (provide kaggle dataset slug like "user/dataset-name")
+2. GitHub repos with sample data (provide raw download URLs)
+3. HuggingFace datasets (provide dataset ID like "org/dataset")
+4. Academic datasets with direct download links
+
+For document/passport/ID OCR, look for:
+- MIDV-500, MIDV-2019, MIDV-2020 (ID document datasets)
+- CORD, SROIE (receipt OCR datasets with similar structure)
+- FUNSD (form understanding dataset)
+- Any passport/ID card recognition datasets
+
+Respond with ONLY a JSON object:
+{{
+  "datasets": [
+    {{
+      "name": "dataset name",
+      "source": "kaggle|github|huggingface|url",
+      "identifier": "download path or URL",
+      "description": "what it contains",
+      "size_mb": estimated size,
+      "format": "images|csv|json",
+      "relevance": 1-10
+    }}
+  ]
+}}
+"""
+
+DATASET_DOWNLOAD_PROMPT = """\
+You are a data engineer. Write a Python script that downloads and prepares \
+the following dataset for benchmarking.
+
+Dataset: {name}
+Source: {source}
+Identifier: {identifier}
+Description: {description}
+
+The script must:
+- Download the dataset to `{output_dir}/`
+- If it's a zip/tar, extract it
+- Organize into folders: each sample in its own directory with image + ground_truth.json
+- ground_truth.json should have fields like: {{"name": "...", "number": "...", "dob": "..."}}
+- If the dataset has a different format, convert it
+- Handle download errors gracefully
+- Print progress
+- Use requests, urllib, or kaggle/huggingface_hub if needed
+
+Output ONLY Python code in ```python ... ```
+"""
+
 IMPROVEMENT_PROMPT = """\
 You are a senior engineer reviewing benchmark results. Suggest code improvements.
 
@@ -166,13 +219,32 @@ class OvernightPipeline:
                 results["error"] = "No hypotheses from research"
                 return results
 
-            # Phase 2: Generate synthetic test data
-            self._log("phase", "Phase 2: Generating test data")
+            # Phase 2a: Search for real datasets
+            self._log("phase", "Phase 2a: Searching for real datasets")
+            if on_progress:
+                await on_progress("data", "Searching for real datasets online...")
+
+            datasets = await self._search_datasets(topic)
+            self._log("datasets_found", f"Found {len(datasets)} datasets")
+
+            # Phase 2b: Download best dataset
+            real_data_dir = None
+            if datasets:
+                self._log("phase", "Phase 2b: Downloading dataset")
+                if on_progress:
+                    await on_progress("data", f"Downloading: {datasets[0].get('name', '?')}...")
+                real_data_dir = await self._download_dataset(datasets[0])
+
+            # Phase 2c: Generate synthetic data as supplement/fallback
+            self._log("phase", "Phase 2c: Generating synthetic test data")
             if on_progress:
                 await on_progress("data", f"Generating {num_samples} synthetic samples...")
 
-            data_dir = await self._generate_test_data(topic, num_samples)
-            self._log("data_done", f"Test data in {data_dir}")
+            synthetic_dir = await self._generate_test_data(topic, num_samples)
+
+            # Use real data if available, synthetic as fallback
+            data_dir = real_data_dir if real_data_dir and list(Path(real_data_dir).glob("*")) else synthetic_dir
+            self._log("data_done", f"Test data in {data_dir} (real={real_data_dir is not None})")
 
             # Phase 3: Implement each hypothesis
             self._log("phase", "Phase 3: Implementing hypotheses")
@@ -252,6 +324,100 @@ class OvernightPipeline:
         if hyp_path:
             return json.loads(hyp_path[0].read_text(encoding="utf-8"))
         return {"hypotheses": []}
+
+    # ------------------------------------------------------------------
+    # Phase 2a: Dataset search
+    # ------------------------------------------------------------------
+
+    async def _search_datasets(self, topic: str) -> list[dict]:
+        """Ask LLM to find real datasets, then also search GitHub."""
+        prompt = DATASET_SEARCH_PROMPT.format(task=topic)
+        raw = await self.llm.generate(prompt, mode=LLMMode.THINKING)
+        data = self._extract_json(raw)
+        datasets = data.get("datasets", [])
+
+        # Also search GitHub for datasets
+        from core.tools import registry
+        gh_result = await registry.execute(
+            "search_github",
+            query=f"{topic} dataset benchmark samples",
+            max_results=5,
+        )
+        if gh_result.success and gh_result.data:
+            for repo in gh_result.data:
+                datasets.append({
+                    "name": repo.get("name", ""),
+                    "source": "github",
+                    "identifier": repo.get("url", ""),
+                    "description": repo.get("description", ""),
+                    "relevance": 6,
+                })
+
+        # Sort by relevance
+        datasets.sort(key=lambda d: -d.get("relevance", 0))
+        self._log("datasets", f"Found {len(datasets)} datasets: {[d['name'] for d in datasets[:3]]}")
+
+        # Save
+        (self.workspace / "datasets_found.json").write_text(
+            json.dumps(datasets, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        return datasets
+
+    async def _download_dataset(self, dataset: dict) -> str | None:
+        """Generate download script and execute it."""
+        download_dir = self.workspace / "real_data"
+        download_dir.mkdir(exist_ok=True)
+
+        prompt = DATASET_DOWNLOAD_PROMPT.format(
+            name=dataset.get("name", ""),
+            source=dataset.get("source", ""),
+            identifier=dataset.get("identifier", ""),
+            description=dataset.get("description", ""),
+            output_dir=str(download_dir),
+        )
+        code = self._extract_code(await self.llm.generate(prompt, mode=LLMMode.THINKING))
+
+        script_path = self.workspace / "download_dataset.py"
+        script_path.write_text(code, encoding="utf-8")
+
+        # Execute download
+        import subprocess
+        try:
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                cwd=str(self.workspace),
+                capture_output=True, text=True, timeout=300,
+            )
+            if result.returncode == 0 and list(download_dir.glob("*")):
+                self._log("download_ok", f"Dataset downloaded to {download_dir}")
+                return str(download_dir)
+            else:
+                self._log("download_fail", f"Download failed: {result.stderr[:200]}")
+                return None
+        except Exception as e:
+            self._log("download_error", str(e))
+            return None
+
+    @staticmethod
+    def _extract_json(text: str) -> dict:
+        text = text.strip()
+        if "```" in text:
+            for block in text.split("```")[1::2]:
+                block = block.strip()
+                if block.startswith("json"):
+                    block = block[4:].strip()
+                try:
+                    return json.loads(block)
+                except Exception:
+                    continue
+        start = text.find("{")
+        end = text.rfind("}") + 1
+        if start >= 0 and end > start:
+            try:
+                return json.loads(text[start:end])
+            except Exception:
+                pass
+        return {}
 
     # ------------------------------------------------------------------
     # Phase 2: Synthetic data
