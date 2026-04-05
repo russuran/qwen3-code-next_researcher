@@ -1,0 +1,13 @@
+# Execution policies (Phase 3+)
+execution:
+  max_parallel_subtasks: 4
+  max_parallel_fetches: 8
+  default_retry_count: 2
+
+git:
+  protected_branches:
+    - main
+    - master
+  branch_prefixes:
+    task: ai/task
+    variant: ai/variant

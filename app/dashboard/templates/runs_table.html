@@ -1,0 +1,39 @@
+<table>
+    <thead>
+        <tr>
+            <th>Topic</th>
+            <th>Status</th>
+            <th>Created</th>
+            <th>Duration</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for run in runs %}
+        <tr>
+            <td><a href="/dashboard/runs/{{ run.id }}">{{ run.topic[:60] }}</a></td>
+            <td><span class="badge badge-{{ run.status }}">{{ run.status }}</span></td>
+            <td>{{ run.created_at.strftime('%Y-%m-%d %H:%M') if run.created_at else '-' }}</td>
+            <td>
+                {% if run.finished_at and run.started_at %}
+                    {{ ((run.finished_at - run.started_at).total_seconds() / 60) | round(1) }}m
+                {% elif run.started_at %}
+                    running...
+                {% else %}
+                    -
+                {% endif %}
+            </td>
+            <td>
+                {% if run.status not in ('completed', 'failed', 'cancelled') %}
+                <button class="btn btn-danger" hx-post="/dashboard/runs/{{ run.id }}/cancel" hx-target="#runs-table" hx-swap="innerHTML" style="padding: 0.25rem 0.5rem; font-size: 0.75rem;">Cancel</button>
+                {% elif run.output_dir %}
+                <a href="/dashboard/runs/{{ run.id }}">View</a>
+                {% endif %}
+            </td>
+        </tr>
+        {% endfor %}
+        {% if not runs %}
+        <tr><td colspan="5" style="text-align: center; color: #64748b;">No runs yet. Start one above.</td></tr>
+        {% endif %}
+    </tbody>
+</table>

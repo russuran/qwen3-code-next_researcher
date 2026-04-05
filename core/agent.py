@@ -1,0 +1,881 @@
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Literal
+
+from pydantic import BaseModel
+from rich.console import Console
+from rich.panel import Panel
+
+from core.llm import LLM, LLMMode
+from core.planner import Planner, ResearchPlan, SubQuestion
+from core.prompts import (
+    SYSTEM_REACT, ANALYSIS, DEEP_ANALYSIS, SYNTHESIS, COMPARISON_TABLE,
+    RELEVANCE_FILTER, HYPOTHESIS_GENERATION,
+)
+from core.tools import ToolRegistry, ToolResult, registry
+from core.claim_verifier import ClaimVerifier
+from knowledge.source_registry import SourceRegistry
+from knowledge.document_store import Document, DocumentStore
+from knowledge.cache_manager import CacheManager
+from sandbox.evaluator import Evaluator
+
+# Import tool modules so they register themselves
+import core.searcher  # noqa: F401
+import core.browser  # noqa: F401
+import core.pdf_parser  # noqa: F401
+
+logger = logging.getLogger(__name__)
+console = Console()
+
+
+# ---------------------------------------------------------------------------
+# Journal
+# ---------------------------------------------------------------------------
+
+class JournalEntry(BaseModel):
+    timestamp: str
+    phase: Literal["plan", "search", "analyze", "synthesize"]
+    action: str
+    tool_name: str | None = None
+    tool_input: dict[str, Any] | None = None
+    result_summary: str = ""
+
+
+# ---------------------------------------------------------------------------
+# Data models
+# ---------------------------------------------------------------------------
+
+class Finding(BaseModel):
+    source: str
+    query: str
+    results: list[dict[str, Any]] = []
+
+
+class AnalysisResult(BaseModel):
+    title: str = ""
+    approach: str = ""
+    key_contributions: list[str] = []
+    strengths: list[str] = []
+    weaknesses: list[str] = []
+    relevant_code: str = ""
+    tags: list[str] = []
+    raw_source: dict[str, Any] = {}
+
+
+# ---------------------------------------------------------------------------
+# compare_methods tool (LLM-driven)
+# ---------------------------------------------------------------------------
+
+_llm_ref: LLM | None = None
+
+
+@registry.register(
+    name="compare_methods",
+    description="Build a comparison table for a list of methods/approaches.",
+    params=[],
+)
+async def compare_methods(methods_json: str) -> ToolResult:
+    if _llm_ref is None:
+        return ToolResult(tool_name="compare_methods", success=False, error="LLM not initialized")
+    prompt = COMPARISON_TABLE.replace("{{ methods }}", methods_json)
+    table_md = await _llm_ref.generate(prompt, mode=LLMMode.FAST)
+    return ToolResult(tool_name="compare_methods", success=True, data={"table": table_md})
+
+
+# ---------------------------------------------------------------------------
+# ReAct parser
+# ---------------------------------------------------------------------------
+
+_RE_ACTION = re.compile(r"Action:\s*(\S+)", re.IGNORECASE)
+_RE_ACTION_INPUT = re.compile(r"Action Input:\s*(\{.*\})", re.IGNORECASE | re.DOTALL)
+_RE_FINAL_ANSWER = re.compile(r"Final Answer:\s*(.*)", re.IGNORECASE | re.DOTALL)
+
+
+def _parse_react(text: str) -> tuple[str | None, dict | None, str | None]:
+    """Parse ReAct output -> (action_name, action_input, final_answer)."""
+    final = _RE_FINAL_ANSWER.search(text)
+    if final:
+        return None, None, final.group(1).strip()
+
+    action_match = _RE_ACTION.search(text)
+    input_match = _RE_ACTION_INPUT.search(text)
+
+    if action_match:
+        action_name = action_match.group(1).strip()
+        action_input = {}
+        if input_match:
+            try:
+                action_input = json.loads(input_match.group(1))
+            except json.JSONDecodeError:
+                logger.warning("Failed to parse Action Input JSON")
+        return action_name, action_input, None
+
+    return None, None, None
+
+
+# ---------------------------------------------------------------------------
+# Agent
+# ---------------------------------------------------------------------------
+
+class AgentConfig(BaseModel):
+    output_dir: str = "./output"
+    journal_dir: str = "./journal"
+    sources: list[str] = ["arxiv", "semantic_scholar", "github", "papers_with_code"]
+    max_results_per_source: int = 20
+    parallel_search: bool = True
+    verbose: bool = False
+    intervene: bool = False
+
+
+class ResearchAgent:
+    def __init__(
+        self,
+        config: AgentConfig,
+        llm: LLM,
+        tool_registry: ToolRegistry | None = None,
+    ) -> None:
+        self.config = config
+        self.llm = llm
+        self.registry = tool_registry or registry
+        self.planner = Planner(llm)
+        self._journal_path: Path | None = None
+
+        # Knowledge layer
+        self.source_registry = SourceRegistry()
+        self.doc_store = DocumentStore()
+        self.cache = CacheManager(cache_dir=str(Path(config.output_dir) / ".cache"))
+        self.evaluator = Evaluator()
+        self.claim_verifier = ClaimVerifier(llm)
+
+        # Set global LLM ref for compare_methods tool
+        global _llm_ref
+        _llm_ref = llm
+
+    async def run(self, topic: str) -> Path:
+        """Main entry point. Returns path to the output directory."""
+        console.print(Panel(f"[bold]Deep Research:[/bold] {topic}", style="blue"))
+
+        # Phase 1: Plan
+        plan = await self._plan(topic)
+        output_dir = Path(self.config.output_dir) / plan.slug
+        output_dir.mkdir(parents=True, exist_ok=True)
+        self._init_journal(plan.slug)
+        (output_dir / "01_plan.json").write_text(
+            plan.model_dump_json(indent=2), encoding="utf-8"
+        )
+
+        if self.config.intervene:
+            if not await self._check_intervention("plan", plan):
+                return output_dir
+
+        # Phase 2: Search
+        findings = await self._search(plan)
+        (output_dir / "02_sources.json").write_text(
+            json.dumps([f.model_dump() for f in findings], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        # Phase 2.5: Relevance filter
+        findings = await self._filter_relevant(plan.topic, findings)
+        (output_dir / "02_filtered.json").write_text(
+            json.dumps([f.model_dump() for f in findings], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        # Phase 2.7: Deep fetch (PDF, README, code for top results)
+        findings = await self._deep_fetch(findings, output_dir)
+
+        if self.config.intervene:
+            if not await self._check_intervention("search", plan, findings=findings):
+                return output_dir
+
+        # Phase 3: Deep analyze (with full content)
+        analyses = await self._analyze(findings)
+        summaries_dir = output_dir / "05_summaries"
+        summaries_dir.mkdir(exist_ok=True)
+        for i, a in enumerate(analyses):
+            safe_title = "".join(c if c.isalnum() or c in "-_ " else "_" for c in a.title[:50]).strip()
+            (summaries_dir / f"{i:03d}_{safe_title}.json").write_text(
+                a.model_dump_json(indent=2), encoding="utf-8"
+            )
+
+        # Phase 3.5: Iterative deepening — refine plan and do second pass
+        refined_queries = await self.planner.refine_plan(
+            plan,
+            "\n".join(f"- {a.title}: {a.approach[:100]}" for a in analyses[:10]),
+        )
+        if refined_queries:
+            console.print(f"\n[bold]Iterative deepening:[/bold] {len(refined_queries)} refined queries")
+            self._log(JournalEntry(
+                timestamp=self._now(), phase="search",
+                action="iterative_deepening",
+                result_summary=f"{len(refined_queries)} refined queries",
+            ))
+            extra_findings = await self._search_refined(refined_queries)
+            if extra_findings:
+                extra_findings = await self._filter_relevant(plan.topic, extra_findings)
+                extra_analyses = await self._analyze(extra_findings)
+                analyses.extend(extra_analyses)
+                for i, a in enumerate(extra_analyses, len(analyses) - len(extra_analyses)):
+                    safe_title = "".join(c if c.isalnum() or c in "-_ " else "_" for c in a.title[:50]).strip()
+                    (summaries_dir / f"{i:03d}_{safe_title}.json").write_text(
+                        a.model_dump_json(indent=2), encoding="utf-8"
+                    )
+
+        # Phase 3.7: Hypothesis generation
+        hypotheses = await self._generate_hypotheses(plan, analyses)
+        (output_dir / "04_hypotheses.json").write_text(
+            json.dumps(hypotheses, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
+        # Phase 3.8: Contradiction detection
+        console.print("\n[bold]Phase 3.8:[/bold] Detecting contradictions...")
+        self._log(JournalEntry(
+            timestamp=self._now(), phase="analyze",
+            action="contradiction_detection", result_summary="Checking cross-source contradictions",
+        ))
+        try:
+            source_dicts = [a.model_dump(exclude={"raw_source"}) for a in analyses[:15]]
+            contradictions = await self.claim_verifier.detect_contradictions(source_dicts)
+            c_count = len(contradictions.get("contradictions", []))
+            consensus_count = len(contradictions.get("consensus", []))
+            console.print(f"  Found {c_count} contradictions, {consensus_count} consensus points")
+            self._log(JournalEntry(
+                timestamp=self._now(), phase="analyze",
+                action="contradictions_found",
+                result_summary=f"{c_count} contradictions, {consensus_count} consensus",
+            ))
+            hypotheses["contradictions"] = contradictions.get("contradictions", [])
+            hypotheses["consensus"] = contradictions.get("consensus", [])
+            # Update hypotheses file
+            (output_dir / "04_hypotheses.json").write_text(
+                json.dumps(hypotheses, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception as e:
+            logger.warning("Contradiction detection failed: %s", e)
+
+        # Phase 4: Synthesize (with hypotheses)
+        report_path = await self._synthesize(plan, analyses, output_dir, hypotheses)
+
+        console.print(Panel(
+            f"[bold green]Research complete![/bold green]\n"
+            f"Output: {output_dir}\n"
+            f"Report: {report_path}",
+            style="green",
+        ))
+        return output_dir
+
+    # ------------------------------------------------------------------
+    # Phase 1: Planning
+    # ------------------------------------------------------------------
+
+    async def _plan(self, topic: str) -> ResearchPlan:
+        console.print("[bold]Phase 1:[/bold] Generating research plan...")
+        self._log(JournalEntry(
+            timestamp=self._now(), phase="plan",
+            action="generate_plan", result_summary=f"Topic: {topic}",
+        ))
+
+        plan = await self.planner.generate_plan(topic)
+
+        for sq in plan.sub_questions:
+            console.print(f"  [dim]P{sq.priority}[/dim] {sq.question}")
+
+        self._log(JournalEntry(
+            timestamp=self._now(), phase="plan",
+            action="plan_generated",
+            result_summary=f"{len(plan.sub_questions)} sub-questions",
+        ))
+        return plan
+
+    # ------------------------------------------------------------------
+    # Phase 2: Search
+    # ------------------------------------------------------------------
+
+    async def _search(self, plan: ResearchPlan) -> list[Finding]:
+        console.print("\n[bold]Phase 2:[/bold] Searching sources...")
+        findings: list[Finding] = []
+
+        tasks = []
+        for sq in plan.sub_questions:
+            for source in sq.sources:
+                if source not in self.config.sources:
+                    continue
+                tool_name = f"search_{source}"
+                if not self.registry.get(tool_name):
+                    continue
+                tasks.append((sq, source, tool_name))
+
+        async def _do_search(sq: SubQuestion, source: str, tool_name: str) -> Finding | None:
+            # Use keywords for API search (always English), fall back to question
+            if sq.keywords:
+                query = " ".join(sq.keywords)
+            else:
+                query = sq.question
+            # If query contains non-ASCII (e.g. Cyrillic), prefer keywords
+            if any(ord(c) > 127 for c in query) and sq.keywords:
+                query = " ".join(sq.keywords)
+            cache_key = f"{tool_name}:{query}:{self.config.max_results_per_source}"
+
+            # Check cache first
+            cached = self.cache.get("search", cache_key)
+            if cached is not None:
+                console.print(f"  [dim]{tool_name}:[/dim] {query[:60]}... [green](cached)[/green]")
+                self._log(JournalEntry(
+                    timestamp=self._now(), phase="search",
+                    action="cache_hit", tool_name=tool_name,
+                    result_summary=f"{len(cached)} cached results",
+                ))
+                return Finding(source=source, query=query, results=cached)
+
+            console.print(f"  [dim]{tool_name}:[/dim] {query[:60]}...")
+
+            self._log(JournalEntry(
+                timestamp=self._now(), phase="search",
+                action="tool_call", tool_name=tool_name,
+                tool_input={"query": query, "max_results": self.config.max_results_per_source},
+            ))
+
+            result = await self.registry.execute(
+                tool_name,
+                query=query,
+                max_results=self.config.max_results_per_source,
+            )
+
+            if result.success and result.data:
+                data = result.data if isinstance(result.data, list) else []
+                # Cache only non-empty results for 1 hour
+                if data:
+                    self.cache.set("search", cache_key, data, ttl_seconds=3600)
+                # Register sources
+                for item in data:
+                    url = item.get("url") or item.get("pdf_url") or item.get("paper_url") or ""
+                    if url:
+                        self.source_registry.register(url, source)
+                self._log(JournalEntry(
+                    timestamp=self._now(), phase="search",
+                    action="tool_result", tool_name=tool_name,
+                    result_summary=f"{len(data)} results",
+                ))
+                return Finding(source=source, query=query, results=data)
+            else:
+                self._log(JournalEntry(
+                    timestamp=self._now(), phase="search",
+                    action="tool_error", tool_name=tool_name,
+                    result_summary=result.error or "no results",
+                ))
+                return None
+
+        if self.config.parallel_search:
+            results = await asyncio.gather(
+                *[_do_search(sq, src, tn) for sq, src, tn in tasks],
+                return_exceptions=True,
+            )
+            for r in results:
+                if isinstance(r, Finding):
+                    findings.append(r)
+                elif isinstance(r, Exception):
+                    logger.error("Search task failed: %s", r)
+        else:
+            for sq, src, tn in tasks:
+                r = await _do_search(sq, src, tn)
+                if r:
+                    findings.append(r)
+
+        console.print(f"  [green]Found {sum(len(f.results) for f in findings)} total results[/green]")
+        return findings
+
+    # ------------------------------------------------------------------
+    # Phase 2.5: Relevance filter
+    # ------------------------------------------------------------------
+
+    async def _filter_relevant(self, topic: str, findings: list[Finding]) -> list[Finding]:
+        console.print("\n[bold]Phase 2.5:[/bold] Filtering by relevance...")
+        filtered_findings: list[Finding] = []
+
+        for finding in findings:
+            relevant_items = []
+            for item in finding.results:
+                title = item.get("title") or item.get("name") or ""
+                abstract = item.get("abstract") or item.get("description") or ""
+
+                if not title:
+                    continue
+
+                prompt = self._inject_date(
+                    RELEVANCE_FILTER
+                    .replace("{{ topic }}", topic)
+                    .replace("{{ title }}", title)
+                    .replace("{{ abstract }}", abstract[:500])
+                )
+
+                try:
+                    raw = await self.llm.generate(prompt, mode=LLMMode.FAST)
+                    data = self.planner._extract_json(raw)
+                    score = int(data.get("score", 0))
+                    reason = data.get("reason", "")
+
+                    self._log(JournalEntry(
+                        timestamp=self._now(), phase="search",
+                        action="relevance_check",
+                        result_summary=f"score={score}/10 {title[:50]} | {reason[:50]}",
+                    ))
+
+                    if score >= 5:
+                        item["_relevance_score"] = score
+                        item["_relevance_reason"] = reason
+                        relevant_items.append(item)
+                    else:
+                        console.print(f"  [dim]Filtered out (score={score}):[/dim] {title[:60]}")
+                except Exception as e:
+                    # On error, keep the item
+                    relevant_items.append(item)
+
+            if relevant_items:
+                filtered_findings.append(Finding(
+                    source=finding.source,
+                    query=finding.query,
+                    results=relevant_items,
+                ))
+
+        total_before = sum(len(f.results) for f in findings)
+        total_after = sum(len(f.results) for f in filtered_findings)
+        console.print(f"  [green]Kept {total_after}/{total_before} relevant results[/green]")
+        return filtered_findings
+
+    # ------------------------------------------------------------------
+    # Phase 2.7: Deep fetch
+    # ------------------------------------------------------------------
+
+    async def _deep_fetch(self, findings: list[Finding], output_dir: Path) -> list[Finding]:
+        console.print("\n[bold]Phase 2.7:[/bold] Deep fetching top sources...")
+        papers_dir = output_dir / "03_papers"
+        papers_dir.mkdir(exist_ok=True)
+        code_dir = output_dir / "04_code"
+        code_dir.mkdir(exist_ok=True)
+
+        for finding in findings:
+            for item in finding.results[:10]:  # Top 10 per finding
+                # Fetch PDF for papers
+                pdf_url = item.get("pdf_url")
+                if pdf_url:
+                    try:
+                        safe_name = "".join(c if c.isalnum() or c in "-_" else "_"
+                                           for c in (item.get("title", "paper"))[:40])
+                        save_path = str(papers_dir / f"{safe_name}.pdf")
+                        result = await self.registry.execute(
+                            "download_pdf", url=pdf_url, save_path=save_path
+                        )
+                        if result.success:
+                            # Parse the PDF and attach content
+                            parse_result = await self.registry.execute(
+                                "parse_pdf", file_path=save_path, max_chars=6000
+                            )
+                            if parse_result.success and parse_result.data:
+                                item["_full_text"] = parse_result.data.get("text", "")
+                                self._log(JournalEntry(
+                                    timestamp=self._now(), phase="search",
+                                    action="deep_fetch_pdf",
+                                    result_summary=f"Parsed {parse_result.data.get('num_pages', 0)} pages: {item.get('title', '')[:50]}",
+                                ))
+                    except Exception as e:
+                        logger.debug("PDF fetch failed for %s: %s", pdf_url, e)
+
+                # Fetch README for GitHub repos
+                repo_url = item.get("url", "")
+                if "github.com" in repo_url and not item.get("_full_text"):
+                    try:
+                        result = await self.registry.execute("inspect_code", url=repo_url)
+                        if result.success and result.data:
+                            item["_full_text"] = result.data.get("content", "")
+                            self._log(JournalEntry(
+                                timestamp=self._now(), phase="search",
+                                action="deep_fetch_readme",
+                                result_summary=f"Fetched README: {item.get('name', item.get('title', ''))[:50]}",
+                            ))
+                    except Exception as e:
+                        logger.debug("README fetch failed for %s: %s", repo_url, e)
+
+        fetched = sum(1 for f in findings for i in f.results if i.get("_full_text"))
+        console.print(f"  [green]Deep fetched {fetched} full texts[/green]")
+        return findings
+
+    # ------------------------------------------------------------------
+    # Phase 3.5: Search refined queries
+    # ------------------------------------------------------------------
+
+    async def _search_refined(self, refined_queries) -> list[Finding]:
+        """Execute refined search queries from iterative deepening."""
+        findings: list[Finding] = []
+        for rq in refined_queries:
+            tool_name = f"search_{rq.source}"
+            if not self.registry.get(tool_name):
+                continue
+
+            self._log(JournalEntry(
+                timestamp=self._now(), phase="search",
+                action="refined_search", tool_name=tool_name,
+                tool_input={"query": rq.query},
+                result_summary=f"Reason: {rq.reason[:60]}",
+            ))
+
+            result = await self.registry.execute(tool_name, query=rq.query, max_results=5)
+            if result.success and result.data:
+                data = result.data if isinstance(result.data, list) else []
+                if data:
+                    findings.append(Finding(source=rq.source, query=rq.query, results=data))
+
+        return findings
+
+    # ------------------------------------------------------------------
+    # Phase 3.7: Hypothesis generation
+    # ------------------------------------------------------------------
+
+    async def _generate_hypotheses(self, plan: ResearchPlan, analyses: list[AnalysisResult]) -> dict:
+        console.print("\n[bold]Phase 3.7:[/bold] Generating hypotheses...")
+
+        analyses_summary = "\n".join(
+            f"- {a.title}: {a.approach[:150]}"
+            f"\n  Strengths: {', '.join(a.strengths[:3])}"
+            f"\n  Weaknesses: {', '.join(a.weaknesses[:3])}"
+            for a in analyses[:15]
+        )
+
+        prompt = self._inject_date(
+            HYPOTHESIS_GENERATION
+            .replace("{{ topic }}", plan.topic)
+            .replace("{{ analyses_summary }}", analyses_summary[:8000])
+        )
+
+        raw = await self.llm.generate(prompt, mode=LLMMode.THINKING)
+        data = self.planner._extract_json(raw)
+
+        hypotheses = data.get("hypotheses", [])
+        gaps = data.get("gaps", [])
+        uncertainties = data.get("uncertainties", [])
+
+        for h in hypotheses:
+            console.print(f"  [cyan]H{h.get('id', '?')}:[/cyan] {h.get('title', '')}")
+
+        self._log(JournalEntry(
+            timestamp=self._now(), phase="analyze",
+            action="hypotheses_generated",
+            result_summary=f"{len(hypotheses)} hypotheses, {len(gaps)} gaps, {len(uncertainties)} uncertainties",
+        ))
+
+        return {"hypotheses": hypotheses, "gaps": gaps, "uncertainties": uncertainties}
+
+    # ------------------------------------------------------------------
+    # Phase 3: Analysis
+    # ------------------------------------------------------------------
+
+    async def _analyze(self, findings: list[Finding]) -> list[AnalysisResult]:
+        console.print("\n[bold]Phase 3:[/bold] Analyzing findings...")
+        analyses: list[AnalysisResult] = []
+
+        # Deduplicate by title
+        seen_titles: set[str] = set()
+        unique_items: list[tuple[str, dict]] = []
+
+        for finding in findings:
+            for item in finding.results:
+                title = item.get("title") or item.get("name") or ""
+                title_lower = title.lower().strip()
+                if title_lower and title_lower not in seen_titles:
+                    seen_titles.add(title_lower)
+                    unique_items.append((finding.source, item))
+
+        console.print(f"  Analyzing {len(unique_items)} unique sources...")
+
+        for source_type, item in unique_items:
+            full_text = item.get("_full_text", "")
+            title = item.get("title") or item.get("name") or ""
+
+            if full_text:
+                # Deep analysis with full content
+                prompt = self._inject_date(
+                    DEEP_ANALYSIS
+                    .replace("{{ source_type }}", source_type)
+                    .replace("{{ title }}", title)
+                    .replace("{{ content }}", full_text[:6000])
+                )
+                action = "deep_analyze_source"
+            else:
+                # Shallow analysis with metadata only
+                content = json.dumps(item, ensure_ascii=False, default=str)
+                prompt = self._inject_date(
+                    ANALYSIS
+                    .replace("{{ source_type }}", source_type)
+                    .replace("{{ content }}", content[:4000])
+                )
+                action = "analyze_source"
+
+            self._log(JournalEntry(
+                timestamp=self._now(), phase="analyze",
+                action=action,
+                result_summary=f"{'[DEEP] ' if full_text else ''}{title[:70]}",
+            ))
+
+            try:
+                raw = await self.llm.generate(prompt, mode=LLMMode.FAST)
+                data = self.planner._extract_json(raw)
+                analysis = AnalysisResult(raw_source=item, **{
+                    k: v for k, v in data.items()
+                    if k in AnalysisResult.model_fields
+                })
+                if not analysis.title:
+                    analysis.title = item.get("title", item.get("name", "unknown"))
+                analyses.append(analysis)
+            except Exception as e:
+                logger.warning("Failed to analyze item: %s", e)
+                analyses.append(AnalysisResult(
+                    title=item.get("title", item.get("name", "unknown")),
+                    approach=item.get("abstract", item.get("description", "")),
+                    raw_source=item,
+                ))
+
+        console.print(f"  [green]Analyzed {len(analyses)} sources[/green]")
+        return analyses
+
+    # ------------------------------------------------------------------
+    # Phase 4: Synthesis
+    # ------------------------------------------------------------------
+
+    async def _synthesize(
+        self,
+        plan: ResearchPlan,
+        analyses: list[AnalysisResult],
+        output_dir: Path,
+        hypotheses: dict | None = None,
+    ) -> Path:
+        console.print("\n[bold]Phase 4:[/bold] Synthesizing report...")
+
+        self._log(JournalEntry(
+            timestamp=self._now(), phase="synthesize",
+            action="start_synthesis",
+            result_summary=f"{len(analyses)} analyses to synthesize",
+        ))
+
+        # Build analyses summary for prompt
+        analyses_text = "\n\n".join(
+            f"### {a.title}\n"
+            f"Approach: {a.approach}\n"
+            f"Strengths: {', '.join(a.strengths)}\n"
+            f"Weaknesses: {', '.join(a.weaknesses)}\n"
+            f"Code: {a.relevant_code}"
+            for a in analyses
+        )
+
+        plan_summary = "\n".join(
+            f"- {sq.question}" for sq in plan.sub_questions
+        )
+
+        # Add hypotheses to prompt if available
+        hypotheses_text = ""
+        if hypotheses and hypotheses.get("hypotheses"):
+            h_lines = []
+            for h in hypotheses["hypotheses"]:
+                h_lines.append(f"- **{h.get('title', '')}**: {h.get('description', '')}")
+                h_lines.append(f"  Validation: {h.get('validation_method', 'N/A')}")
+            hypotheses_text = "\n\nHypotheses for implementation:\n" + "\n".join(h_lines)
+
+            gaps = hypotheses.get("gaps", [])
+            if gaps:
+                hypotheses_text += "\n\nKnowledge gaps:\n" + "\n".join(f"- {g}" for g in gaps)
+
+            uncertainties = hypotheses.get("uncertainties", [])
+            if uncertainties:
+                hypotheses_text += "\n\nUncertainties:\n" + "\n".join(f"- {u}" for u in uncertainties)
+
+        prompt = self._inject_date(
+            SYNTHESIS
+            .replace("{{ topic }}", plan.topic)
+            .replace("{{ plan_summary }}", plan_summary)
+            .replace("{{ analyses }}", analyses_text[:10000] + hypotheses_text)
+        )
+
+        report = await self.llm.generate(prompt, mode=LLMMode.THINKING)
+
+        # Save synthesis
+        report_path = output_dir / "07_synthesis.md"
+        report_path.write_text(report, encoding="utf-8")
+
+        # Build comparison table
+        methods_json = json.dumps(
+            [{"title": a.title, "approach": a.approach, "strengths": a.strengths,
+              "weaknesses": a.weaknesses, "code": a.relevant_code}
+             for a in analyses],
+            ensure_ascii=False,
+        )
+        comparison_result = await self.registry.execute(
+            "compare_methods", methods_json=methods_json
+        )
+        comparison_md = ""
+        if comparison_result.success and comparison_result.data:
+            comparison_md = comparison_result.data.get("table", "")
+
+        (output_dir / "06_comparison.md").write_text(comparison_md, encoding="utf-8")
+
+        # Build references
+        refs: list[str] = []
+        for i, a in enumerate(analyses, 1):
+            src = a.raw_source
+            url = src.get("url") or src.get("pdf_url") or src.get("paper_url") or src.get("html_url", "")
+            refs.append(f"{i}. **{a.title}** — {url}")
+
+        (output_dir / "08_references.md").write_text(
+            "# References\n\n" + "\n".join(refs), encoding="utf-8"
+        )
+
+        # Store documents in knowledge layer
+        for a in analyses:
+            self.doc_store.add(Document(
+                doc_id=a.title[:60],
+                source_url=a.raw_source.get("url", ""),
+                title=a.title,
+                content=a.approach + " " + " ".join(a.strengths + a.weaknesses),
+                doc_type="analysis",
+            ))
+
+        # Evaluate report quality
+        source_dicts = []
+        for f in []:  # findings not in scope here, use analyses
+            pass
+        for a in analyses:
+            source_dicts.append({"source": "analysis", "title": a.title})
+
+        plan_questions = [sq.question for sq in plan.sub_questions]
+        metrics = self.evaluator.evaluate_report(report, source_dicts, plan_questions)
+
+        eval_data = {
+            "groundedness": round(metrics.groundedness, 3),
+            "coverage": round(metrics.coverage, 3),
+            "source_diversity": round(metrics.source_diversity, 3),
+            "code_presence": round(metrics.code_presence, 3),
+            "overall": round(metrics.overall, 3),
+            "sources_registered": self.source_registry.count(),
+            "documents_stored": self.doc_store.count(),
+            "chunks_indexed": self.doc_store.total_chunks(),
+        }
+
+        (output_dir / "09_evaluation.json").write_text(
+            json.dumps(eval_data, indent=2), encoding="utf-8"
+        )
+
+        console.print(f"  [cyan]Quality score: {metrics.overall:.1%}[/cyan]")
+
+        self._log(JournalEntry(
+            timestamp=self._now(), phase="synthesize",
+            action="evaluation_complete",
+            result_summary=f"overall={metrics.overall:.3f} coverage={metrics.coverage:.3f}",
+        ))
+
+        self._log(JournalEntry(
+            timestamp=self._now(), phase="synthesize",
+            action="synthesis_complete",
+            result_summary=f"Report: {report_path}",
+        ))
+
+        return report_path
+
+    # ------------------------------------------------------------------
+    # ReAct loop (for future use with more complex tasks)
+    # ------------------------------------------------------------------
+
+    async def _react_loop(self, task: str, max_steps: int = 15) -> str:
+        system = SYSTEM_REACT.replace(
+            "{{ tool_definitions }}", self.registry.format_for_prompt()
+        )
+
+        history = f"Task: {task}\n\n"
+
+        for step in range(max_steps):
+            response = await self.llm.generate(history, mode=LLMMode.THINKING, system=system)
+            history += response + "\n"
+
+            action_name, action_input, final_answer = _parse_react(response)
+
+            if final_answer:
+                return final_answer
+
+            if action_name:
+                self._log(JournalEntry(
+                    timestamp=self._now(), phase="search",
+                    action="react_tool_call", tool_name=action_name,
+                    tool_input=action_input,
+                ))
+
+                result = await self.registry.execute(action_name, **(action_input or {}))
+                observation = result.to_observation()
+                history += f"\nObservation: {observation}\n\n"
+
+                self._log(JournalEntry(
+                    timestamp=self._now(), phase="search",
+                    action="react_observation", tool_name=action_name,
+                    result_summary=observation[:200],
+                ))
+            else:
+                # Model didn't produce a valid action or final answer
+                history += "\nYour response did not follow the required format. Please respond with either an Action or a Final Answer.\n\n"
+
+        return "Max steps reached without a final answer."
+
+    # ------------------------------------------------------------------
+    # Intervention
+    # ------------------------------------------------------------------
+
+    async def _check_intervention(
+        self,
+        phase: str,
+        plan: ResearchPlan,
+        findings: list[Finding] | None = None,
+    ) -> bool:
+        summary = f"Phase: {phase}\nTopic: {plan.topic}\n"
+        if findings:
+            summary += f"Findings: {sum(len(f.results) for f in findings)} results from {len(findings)} queries\n"
+
+        console.print(Panel(summary, title="[yellow]Intervention Point[/yellow]", style="yellow"))
+        response = await asyncio.to_thread(
+            input, "Press Enter to continue, or type 'abort' to stop: "
+        )
+        return response.strip().lower() != "abort"
+
+    # ------------------------------------------------------------------
+    # Journal
+    # ------------------------------------------------------------------
+
+    def _init_journal(self, slug: str) -> None:
+        journal_dir = Path(self.config.journal_dir)
+        journal_dir.mkdir(parents=True, exist_ok=True)
+        self._journal_path = journal_dir / f"{slug}.jsonl"
+
+    def _log(self, entry: JournalEntry) -> None:
+        if self._journal_path:
+            with open(self._journal_path, "a", encoding="utf-8") as f:
+                f.write(entry.model_dump_json() + "\n")
+
+        if self.config.verbose:
+            console.print(
+                f"  [dim][{entry.phase}] {entry.action}[/dim]"
+                + (f" -> {entry.result_summary[:80]}" if entry.result_summary else "")
+            )
+
+    @staticmethod
+    def _now() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def _inject_date(text: str) -> str:
+        """Replace date placeholders in prompts."""
+        now = datetime.now(timezone.utc)
+        return (
+            text
+            .replace("{{ current_date }}", now.strftime("%Y-%m-%d"))
+            .replace("{{ current_year }}", str(now.year))
+        )

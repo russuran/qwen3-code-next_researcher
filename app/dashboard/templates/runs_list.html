@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Runs — Researcher{% endblock %}
+{% block content %}
+<h2>New Research</h2>
+<form hx-post="/dashboard/runs" hx-target="#runs-table" hx-swap="innerHTML" hx-indicator="#spinner">
+    <div class="form-row">
+        <input type="text" name="topic" placeholder="Research topic..." required>
+        <button class="btn" type="submit">Start Run</button>
+        <span id="spinner" class="htmx-indicator">Starting...</span>
+    </div>
+</form>
+
+<h2>Runs</h2>
+<div id="runs-table" hx-get="/dashboard/runs/table" hx-trigger="load, every 5s" hx-swap="innerHTML">
+    Loading...
+</div>
+{% endblock %}

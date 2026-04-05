@@ -1,0 +1,11 @@
+provider: ollama
+model: qwen2.5:14b
+host: http://localhost:11434
+api_key: ""
+modes:
+  thinking:
+    temperature: 0.2
+    max_tokens: 4096
+  fast:
+    temperature: 0.7
+    max_tokens: 2048

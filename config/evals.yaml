@@ -1,0 +1,5 @@
+# Evaluation configuration (Phase 4)
+default:
+  groundedness: true
+  coverage: true
+  source_diversity: true

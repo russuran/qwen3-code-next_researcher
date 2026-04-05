@@ -1,0 +1,32 @@
+llm:
+  provider: ollama          # ollama | openai | anthropic | gemini | vllm | lmstudio
+  model: qwen3:8b           # default for M4 Pro 24GB; use qwen3-coder-next for 48GB+
+  host: http://localhost:11434
+  api_key: ""
+  modes:
+    thinking:
+      temperature: 0.2
+      max_tokens: 4096
+    fast:
+      temperature: 0.7
+      max_tokens: 2048
+
+search:
+  sources:
+    - arxiv
+    - semantic_scholar
+    - github
+    - papers_with_code
+  max_results_per_source: 20
+  parallel: true
+
+output:
+  base_dir: ./output
+  format: markdown
+
+journal:
+  base_dir: ./journal
+
+browser:
+  headless: true
+  timeout: 30000
