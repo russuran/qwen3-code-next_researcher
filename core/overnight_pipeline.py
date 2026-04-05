@@ -213,89 +213,86 @@ class OvernightPipeline:
                     results["error"] = "No hypotheses generated"
                     return results
 
-            # Phase 2a: Search for real datasets
-            self._log("phase", "Phase 2a: Searching for real datasets")
+            # Phase 2: Search for datasets (for later benchmark)
+            self._log("phase", "Phase 2: Searching for datasets")
             if on_progress:
-                await on_progress("data", "Searching for real datasets online...")
+                await on_progress("data", "Searching for datasets to benchmark against...")
 
             datasets = await self._search_datasets(topic)
-            self._log("datasets_found", f"Found {len(datasets)} datasets")
+            self._log("datasets_found", f"Found {len(datasets)} potential datasets")
 
-            # Phase 2b: Check for user-uploaded dataset
-            real_data_dir = None
-            uploads_dir = Path("uploads/datasets")
-            if uploads_dir.exists():
-                uploaded = sorted(uploads_dir.iterdir(), reverse=True)
-                if uploaded:
-                    real_data_dir = str(uploaded[0])
-                    self._log("user_dataset", f"Using uploaded dataset: {uploaded[0].name}")
+            # Save dataset suggestions for user
+            (self.workspace / "suggested_datasets.md").write_text(
+                "# Suggested Datasets\n\n"
+                "Upload one of these via the dashboard to run real benchmarks.\n\n"
+                + "\n".join(
+                    f"- **{d['name']}** ({d['source']}): {d.get('description', '')[:80]}\n"
+                    f"  `{d.get('identifier', '')}`"
+                    for d in datasets[:5]
+                ),
+                encoding="utf-8",
+            )
 
-            # Phase 2c: Try downloading from internet if no upload
-            if not real_data_dir and datasets:
-                self._log("phase", "Phase 2b: Downloading dataset from internet")
-                if on_progress:
-                    await on_progress("data", f"Downloading: {datasets[0].get('name', '?')}...")
-                # Try multiple datasets
-                for ds in datasets[:3]:
-                    real_data_dir = await self._download_dataset(ds)
-                    if real_data_dir and list(Path(real_data_dir).glob("*")):
-                        break
-                    real_data_dir = None
-
-            # Phase 2d: Text-only fallback for unit tests
-            synthetic_dir = None
-            if not real_data_dir:
-                self._log("phase", "Phase 2d: No real data — creating text fallback for unit tests")
-                if on_progress:
-                    await on_progress("data", "No real dataset found. Using text-only fallback. Upload real images via Datasets page.")
-                synthetic_dir = str(self.workspace / "test_data")
-                Path(synthetic_dir).mkdir(exist_ok=True)
-                self._create_minimal_test_data(Path(synthetic_dir), num_samples)
-
-            data_dir = real_data_dir or synthetic_dir
-            has_real_images = real_data_dir is not None and any(
-                Path(real_data_dir).rglob("*.jpg") or Path(real_data_dir).rglob("*.png")
-            ) if real_data_dir else False
-            self._log("data_done", f"Data: {data_dir} (real_images={has_real_images})")
-
-            # Phase 3: Implement each hypothesis
-            self._log("phase", "Phase 3: Implementing hypotheses")
+            # Phase 3: Implement all hypotheses + smoke test
+            self._log("phase", "Phase 3: Implementing hypotheses with smoke tests")
             implementations = []
 
-            for hyp in hypotheses[:3]:  # Top 3 hypotheses
+            for hyp in hypotheses[:5]:
                 self._log("implement", f"Implementing: {hyp.get('title', '')}")
                 if on_progress:
                     await on_progress("implement", f"Implementing H{hyp.get('id', '?')}: {hyp.get('title', '')}")
 
-                impl = await self._implement_and_benchmark(
-                    hyp, libraries, data_dir
-                )
+                impl = await self._implement_hypothesis(hyp, libraries)
                 implementations.append(impl)
 
             results["implementations"] = implementations
 
-            # Phase 4: Iterate improvements on best approach
-            self._log("phase", "Phase 4: Iterative improvement")
-            best = max(implementations, key=lambda x: x.get("metrics", {}).get("accuracy", 0))
+            working = [i for i in implementations if i.get("smoke_test_passed")]
+            failed = [i for i in implementations if not i.get("smoke_test_passed")]
+            self._log("implementations_done",
+                       f"{len(working)} working, {len(failed)} failed smoke test out of {len(implementations)}")
 
-            if best.get("metrics", {}).get("accuracy", 0) > 0:
+            # Phase 4: Check for real data and benchmark if available
+            data_dir = self._find_real_data()
+
+            if data_dir:
+                self._log("phase", "Phase 4: Benchmarking on real data")
+                if on_progress:
+                    await on_progress("benchmark", f"Running benchmarks on {data_dir}")
+
+                for impl in working:
+                    metrics = await self._run_benchmark(Path(impl["code_path"]).parent)
+                    impl["benchmark_metrics"] = metrics
+                    self._log("benchmark", f"{impl['hypothesis'].get('title','')}: {metrics}")
+
+                # Iterate improvements on best
+                best = max(working, key=lambda x: x.get("benchmark_metrics", {}).get("accuracy", 0)) if working else {}
                 for iteration in range(self.max_iterations):
-                    if on_progress:
-                        await on_progress("improve", f"Improvement iteration {iteration + 1}/{self.max_iterations}")
-
-                    improved = await self._improve_implementation(best, data_dir, libraries)
-                    if improved.get("metrics", {}).get("accuracy", 0) > best.get("metrics", {}).get("accuracy", 0):
-                        best = improved
-                        self._log("improved", f"Iteration {iteration + 1}: accuracy improved to {best['metrics']['accuracy']:.2%}")
-                    else:
-                        self._log("plateau", f"Iteration {iteration + 1}: no improvement, stopping")
+                    if not best or not best.get("benchmark_metrics"):
                         break
+                    if on_progress:
+                        await on_progress("improve", f"Improvement iteration {iteration + 1}")
+                    improved = await self._improve_implementation(best, data_dir, libraries)
+                    if improved.get("metrics", {}).get("accuracy", 0) > best.get("benchmark_metrics", {}).get("accuracy", 0):
+                        best = improved
+                        self._log("improved", f"Iteration {iteration + 1}: improved")
+                    else:
+                        self._log("plateau", f"Iteration {iteration + 1}: no improvement")
+                        break
+                results["best_approach"] = best
+                results["final_metrics"] = best.get("benchmark_metrics", best.get("metrics", {}))
+                results["status"] = "benchmarked"
+            else:
+                self._log("waiting_data",
+                           "Implementations ready. Upload dataset via /dashboard/upload-dataset to run benchmarks.")
+                if on_progress:
+                    await on_progress("waiting", "Implementations ready. Waiting for dataset upload to run benchmarks.")
+                results["best_approach"] = working[0] if working else {}
+                results["final_metrics"] = {"status": "waiting_for_data", "implementations_ready": len(working)}
+                results["status"] = "waiting_data"
 
-            results["best_approach"] = best
-            results["final_metrics"] = best.get("metrics", {})
-
-            # Phase 5: Final report
-            self._log("phase", "Phase 5: Final report")
+            # Phase 5: Report
+            self._log("phase", "Phase 5: Report")
             report = await self._generate_final_report(results)
             report_path = self.workspace / "final_report.md"
             report_path.write_text(report, encoding="utf-8")
@@ -390,6 +387,117 @@ Respond with JSON: {{"hypotheses": [{{"id": "H1", "title": "...", "description":
             json.dumps(datasets, indent=2, ensure_ascii=False), encoding="utf-8"
         )
         return datasets
+
+    # ------------------------------------------------------------------
+    # Phase 3: Implement + smoke test
+    # ------------------------------------------------------------------
+
+    async def _implement_hypothesis(self, hyp: dict, libraries: str) -> dict:
+        """Generate code + run smoke test (one dummy input to verify it doesn't crash)."""
+        slug = "".join(c if c.isalnum() or c == "-" else "-" for c in hyp.get("title", "impl")[:30].lower()).strip("-")
+        impl_dir = self.workspace / slug
+        impl_dir.mkdir(parents=True, exist_ok=True)
+
+        # Generate implementation
+        prompt = REAL_IMPLEMENTATION_PROMPT.format(
+            title=hyp.get("title", ""),
+            description=hyp.get("description", ""),
+            approach=hyp.get("approach", ""),
+            libraries=libraries,
+        )
+        code = self._extract_code(await self.llm.generate(prompt, mode=LLMMode.THINKING))
+        code_path = impl_dir / "implementation.py"
+        code_path.write_text(code, encoding="utf-8")
+
+        # Generate benchmark script
+        bench_prompt = REAL_BENCHMARK_PROMPT.format(title=hyp.get("title", ""))
+        bench_code = self._extract_code(await self.llm.generate(bench_prompt, mode=LLMMode.THINKING))
+        (impl_dir / "test_benchmark.py").write_text(bench_code, encoding="utf-8")
+
+        # Create dummy smoke test input
+        smoke_dir = impl_dir / "smoke_test"
+        smoke_dir.mkdir(exist_ok=True)
+        # Black square image
+        try:
+            from PIL import Image
+            img = Image.new("RGB", (200, 100), color=(0, 0, 0))
+            img.save(str(smoke_dir / "dummy.png"))
+        except ImportError:
+            (smoke_dir / "dummy.txt").write_text("smoke test input", encoding="utf-8")
+
+        # Smoke test: just import and call run() — check it doesn't crash
+        smoke_script = f"""
+import sys
+sys.path.insert(0, "{impl_dir}")
+try:
+    import implementation
+    if hasattr(implementation, 'run'):
+        result = implementation.run("{smoke_dir}")
+        print(f"OK: {{result}}")
+    elif hasattr(implementation, 'demo'):
+        implementation.demo()
+        print("OK: demo ran")
+    else:
+        print("OK: module imported")
+except Exception as e:
+    print(f"FAIL: {{e}}")
+    sys.exit(1)
+"""
+        smoke_path = impl_dir / "smoke_test.py"
+        smoke_path.write_text(smoke_script)
+
+        import subprocess
+        try:
+            result = subprocess.run(
+                [sys.executable, str(smoke_path)],
+                capture_output=True, text=True, timeout=60,
+            )
+            passed = result.returncode == 0
+            self._log("smoke_test",
+                       f"{'PASS' if passed else 'FAIL'}: {hyp.get('title','')} — {result.stdout.strip()[:80]}{result.stderr.strip()[:80]}")
+        except Exception as e:
+            passed = False
+            self._log("smoke_test", f"FAIL: {hyp.get('title','')} — {e}")
+
+        # Git init
+        from repo_adaptation.git_versioning import GitVersioning
+        git = GitVersioning(impl_dir)
+        git.init_if_missing()
+        git.create_branch(f"ai/task/{slug}")
+        git.commit(f"implement: {hyp.get('title', '')[:50]}")
+
+        return {
+            "hypothesis": hyp,
+            "code_path": str(code_path),
+            "slug": slug,
+            "smoke_test_passed": passed,
+            "smoke_output": (result.stdout + result.stderr)[-500:] if 'result' in dir() else "",
+        }
+
+    def _find_real_data(self) -> str | None:
+        """Check if user has uploaded real data."""
+        # Check per-run upload
+        user_data = self.workspace / "user_data"
+        if user_data.exists() and any(user_data.rglob("*.jpg")) or any(user_data.rglob("*.png")) or any(user_data.rglob("*.json")):
+            return str(user_data)
+
+        # Check global uploads
+        uploads_dir = Path("uploads/datasets")
+        if uploads_dir.exists():
+            for d in sorted(uploads_dir.iterdir(), reverse=True):
+                if d.is_dir() and any(d.rglob("*.*")):
+                    return str(d)
+
+        # Check downloaded data
+        real_data = self.workspace / "real_data"
+        if real_data.exists() and any(real_data.rglob("*.*")):
+            return str(real_data)
+
+        return None
+
+    # ------------------------------------------------------------------
+    # Dataset download
+    # ------------------------------------------------------------------
 
     async def _download_dataset(self, dataset: dict) -> str | None:
         """Download dataset using appropriate tool based on source."""
