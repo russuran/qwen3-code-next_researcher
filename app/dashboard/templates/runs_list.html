@@ -62,6 +62,38 @@
     </form>
 </div>
 
+<div class="card" style="border-color: #7c3aed;">
+    <form hx-post="/dashboard/overnight" hx-target="#overnight-status" hx-swap="innerHTML" hx-indicator="#overnight-spinner">
+        <div style="display: flex; justify-content: space-between; align-items: center;">
+            <div>
+                <h2 style="color: #a78bfa;">Overnight Run</h2>
+                <p style="color: #64748b; font-size: 0.85rem;">Research + implement + benchmark + improve. Leave it running overnight.</p>
+            </div>
+            <button class="btn" type="submit" style="background: #7c3aed;">Launch Overnight</button>
+            <span id="overnight-spinner" class="htmx-indicator" style="color: #a78bfa;">Launching...</span>
+        </div>
+        <div style="margin-top: 0.75rem; display: flex; gap: 1rem; flex-wrap: wrap; align-items: end;">
+            <div style="flex: 2;">
+                <label class="form-label">Research topic</label>
+                <input type="text" name="topic" placeholder="e.g. passport field recognition OCR for Russian documents" required>
+            </div>
+            <div>
+                <label class="form-label">Libraries</label>
+                <input type="text" name="libraries" value="pytesseract, easyocr, Pillow, opencv-python" style="width: 250px; background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; padding: 0.4rem; font-size: 0.85rem;">
+            </div>
+            <div>
+                <label class="form-label">Samples</label>
+                <input type="number" name="num_samples" value="50" min="10" max="200" style="width: 70px; background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; padding: 0.4rem; font-size: 0.85rem;">
+            </div>
+            <div>
+                <label class="form-label">Improve iterations</label>
+                <input type="number" name="max_iterations" value="3" min="1" max="10" style="width: 60px; background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; padding: 0.4rem; font-size: 0.85rem;">
+            </div>
+        </div>
+        <div id="overnight-status" style="margin-top: 0.5rem;"></div>
+    </form>
+</div>
+
 <style>
     .hidden { display: none; }
     .form-label { display: block; font-size: 0.8rem; color: #94a3b8; margin-bottom: 0.15rem; }

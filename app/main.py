@@ -64,6 +64,7 @@ def create_app() -> FastAPI:
     from app.api.brownfield import router as brownfield_router
     from app.api.replay import router as replay_router
     from app.api.hypotheses import router as hypotheses_router
+    from app.api.overnight import router as overnight_router
     from app.dashboard.routes import router as dashboard_router
 
     app.include_router(health_router)
@@ -71,6 +72,7 @@ def create_app() -> FastAPI:
     app.include_router(brownfield_router, prefix="/brownfield", tags=["brownfield"])
     app.include_router(replay_router, prefix="/replay", tags=["replay"])
     app.include_router(hypotheses_router, prefix="/hypotheses", tags=["hypotheses"])
+    app.include_router(overnight_router, prefix="/overnight", tags=["overnight"])
     app.include_router(dashboard_router, prefix="/dashboard", tags=["dashboard"])
 
     return app

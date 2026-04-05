@@ -45,6 +45,45 @@ async def runs_table(request: Request, db: AsyncSession = Depends(get_db)):
     return _render("runs_table.html", runs=runs)
 
 
+@router.post("/overnight", response_class=HTMLResponse)
+async def launch_overnight_form(
+    request: Request,
+    topic: str = Form(...),
+    libraries: str = Form("pytesseract, easyocr, Pillow, opencv-python"),
+    num_samples: int = Form(50),
+    max_iterations: int = Form(3),
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    import httpx as httpx_client
+    try:
+        async with httpx_client.AsyncClient() as client:
+            resp = await client.post(
+                "http://localhost:8000/overnight",
+                json={
+                    "topic": topic, "libraries": libraries,
+                    "num_samples": num_samples, "max_iterations": max_iterations,
+                },
+                timeout=30,
+            )
+            if resp.status_code == 201:
+                data = resp.json()
+                run_id = data.get("run_id", "")
+                return HTMLResponse(
+                    f'<div style="padding: 0.5rem; background: #2e1065; border: 1px solid #7c3aed; border-radius: 0.375rem;">'
+                    f'Overnight pipeline launched. '
+                    f'<a href="/dashboard/runs/{run_id}" style="color: #a78bfa;">Track progress</a>'
+                    f'</div>'
+                )
+            else:
+                return HTMLResponse(
+                    f'<div style="padding: 0.5rem; background: #450a0a; border: 1px solid #991b1b; border-radius: 0.375rem;">'
+                    f'Error: {resp.text[:200]}</div>'
+                )
+    except Exception as e:
+        return HTMLResponse(f'<div style="color: #ef4444;">Error: {e}</div>')
+
+
 @router.post("/runs", response_class=HTMLResponse)
 async def create_run_form(
     request: Request,
