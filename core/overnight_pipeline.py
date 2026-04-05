@@ -392,36 +392,111 @@ Respond with JSON: {{"hypotheses": [{{"id": "H1", "title": "...", "description":
         return datasets
 
     async def _download_dataset(self, dataset: dict) -> str | None:
-        """Generate download script and execute it."""
+        """Download dataset using appropriate tool based on source."""
+        import subprocess
         download_dir = self.workspace / "real_data"
         download_dir.mkdir(exist_ok=True)
 
-        prompt = DATASET_DOWNLOAD_PROMPT.format(
-            name=dataset.get("name", ""),
-            source=dataset.get("source", ""),
-            identifier=dataset.get("identifier", ""),
-            description=dataset.get("description", ""),
-            output_dir=str(download_dir),
-        )
-        code = self._extract_code(await self.llm.generate(prompt, mode=LLMMode.THINKING))
+        source = dataset.get("source", "")
+        identifier = dataset.get("identifier", "")
+        name = dataset.get("name", "unknown")
 
-        script_path = self.workspace / "download_dataset.py"
-        script_path.write_text(code, encoding="utf-8")
+        self._log("download_try", f"Trying {source}: {name} ({identifier[:60]})")
 
-        # Execute download
-        import subprocess
         try:
-            result = subprocess.run(
-                [sys.executable, str(script_path)],
-                cwd=str(self.workspace),
-                capture_output=True, text=True, timeout=300,
-            )
-            if result.returncode == 0 and list(download_dir.glob("*")):
-                self._log("download_ok", f"Dataset downloaded to {download_dir}")
-                return str(download_dir)
+            if source == "kaggle" and identifier:
+                # Use kaggle CLI directly
+                result = subprocess.run(
+                    [sys.executable, "-m", "kaggle", "datasets", "download", "-d", identifier, "-p", str(download_dir), "--unzip"],
+                    capture_output=True, text=True, timeout=600,
+                )
+                if result.returncode == 0 and list(download_dir.rglob("*.*")):
+                    self._log("download_ok", f"Kaggle dataset: {name}")
+                    return str(download_dir)
+                self._log("download_fail", f"Kaggle: {result.stderr[:150]}")
+
+            elif source == "huggingface" and identifier:
+                # Use huggingface datasets
+                script = f"""
+import sys
+try:
+    from datasets import load_dataset
+    ds = load_dataset("{identifier}", split="train[:100]")
+    ds.save_to_disk("{download_dir}")
+    print("OK")
+except Exception as e:
+    print(f"Error: {{e}}", file=sys.stderr)
+    sys.exit(1)
+"""
+                script_path = self.workspace / "download_hf.py"
+                script_path.write_text(script)
+                result = subprocess.run(
+                    [sys.executable, str(script_path)],
+                    capture_output=True, text=True, timeout=600,
+                )
+                if result.returncode == 0 and list(download_dir.rglob("*")):
+                    self._log("download_ok", f"HuggingFace dataset: {name}")
+                    return str(download_dir)
+                self._log("download_fail", f"HuggingFace: {result.stderr[:150]}")
+
+            elif source == "github" and identifier:
+                # Clone or download from GitHub
+                url = identifier
+                if "github.com" in url and not url.endswith(".git"):
+                    url = url.rstrip("/") + ".git"
+                result = subprocess.run(
+                    ["git", "clone", "--depth", "1", url, str(download_dir / name.replace("/", "-"))],
+                    capture_output=True, text=True, timeout=300,
+                )
+                if result.returncode == 0:
+                    self._log("download_ok", f"GitHub repo: {name}")
+                    return str(download_dir)
+                self._log("download_fail", f"GitHub: {result.stderr[:150]}")
+
+            elif source == "url" and identifier:
+                # Direct URL download
+                import httpx
+                async with httpx.AsyncClient(timeout=300, follow_redirects=True) as client:
+                    resp = await client.get(identifier)
+                    if resp.status_code == 200:
+                        fname = identifier.split("/")[-1] or "dataset.zip"
+                        fpath = download_dir / fname
+                        fpath.write_bytes(resp.content)
+                        # Unzip if needed
+                        if fname.endswith(".zip"):
+                            import zipfile
+                            with zipfile.ZipFile(fpath) as zf:
+                                zf.extractall(download_dir)
+                            fpath.unlink()
+                        self._log("download_ok", f"URL download: {name}")
+                        return str(download_dir)
+                self._log("download_fail", f"URL failed: {identifier[:100]}")
+
             else:
-                self._log("download_fail", f"Download failed: {result.stderr[:200]}")
-                return None
+                # Fallback: LLM generates download script
+                prompt = DATASET_DOWNLOAD_PROMPT.format(
+                    name=name, source=source, identifier=identifier,
+                    description=dataset.get("description", ""), output_dir=str(download_dir),
+                )
+                code = self._extract_code(await self.llm.generate(prompt, mode=LLMMode.THINKING))
+                script_path = self.workspace / "download_dataset.py"
+                script_path.write_text(code, encoding="utf-8")
+                result = subprocess.run(
+                    [sys.executable, str(script_path)],
+                    cwd=str(self.workspace),
+                    capture_output=True, text=True, timeout=300,
+                )
+                if result.returncode == 0 and list(download_dir.rglob("*.*")):
+                    self._log("download_ok", f"Script download: {name}")
+                    return str(download_dir)
+                self._log("download_fail", f"Script: {result.stderr[:150]}")
+
+        except subprocess.TimeoutExpired:
+            self._log("download_timeout", f"Timeout downloading: {name}")
+        except Exception as e:
+            self._log("download_error", f"{name}: {e}")
+
+        return None
         except Exception as e:
             self._log("download_error", str(e))
             return None
