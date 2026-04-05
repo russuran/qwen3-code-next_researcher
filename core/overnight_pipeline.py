@@ -56,23 +56,16 @@ Output ONLY Python code in ```python ... ```
 
 SYNTHETIC_DATA_PROMPT = """\
 You are a data engineer. Generate a Python script that creates synthetic test data \
-for {task}.
+for: {task}
 
 The script should:
-- Create a directory `test_data/` with sample files
-- Generate {num_samples} synthetic samples
-- Each sample should have:
-  - Input data (text file simulating OCR output, or image if possible)
-  - Ground truth labels (JSON file with correct field values)
-- For passport fields, generate realistic:
-  - Full name (Russian names in Cyrillic)
-  - Passport number (format: XX XX XXXXXX)
-  - Date of birth (DD.MM.YYYY)
-  - Gender (M/F)
-  - Issue date, authority code
-- Add realistic OCR noise: character substitutions (0↔O, 1↔I, З↔3), missing chars, extra spaces
-
-Include a `generate()` function that creates the data and returns the path.
+- Create a directory `test_data/` with {num_samples} samples
+- Each sample in its own folder (sample_000, sample_001, ...)
+- Each sample has: input data file + ground_truth.json
+- Generate realistic data appropriate for the specific task
+- Add realistic noise patterns typical for this domain
+- Include a `generate()` function that creates the data and returns the path
+- Use only standard library + common packages (json, random, pathlib, etc.)
 
 Output ONLY Python code in ```python ... ```
 """
@@ -215,9 +208,12 @@ class OvernightPipeline:
             self._log("research_done", f"{len(hypotheses)} hypotheses generated")
 
             if not hypotheses:
-                self._log("error", "No hypotheses generated, aborting")
-                results["error"] = "No hypotheses from research"
-                return results
+                self._log("fallback", "No hypotheses from research, generating from topic")
+                hypotheses = await self._generate_fallback_hypotheses(topic)
+                if not hypotheses:
+                    self._log("error", "Could not generate any hypotheses")
+                    results["error"] = "No hypotheses generated"
+                    return results
 
             # Phase 2a: Search for real datasets
             self._log("phase", "Phase 2a: Searching for real datasets")
@@ -227,24 +223,42 @@ class OvernightPipeline:
             datasets = await self._search_datasets(topic)
             self._log("datasets_found", f"Found {len(datasets)} datasets")
 
-            # Phase 2b: Download best dataset
+            # Phase 2b: Check for user-uploaded dataset
             real_data_dir = None
-            if datasets:
-                self._log("phase", "Phase 2b: Downloading dataset")
+            uploads_dir = Path("uploads/datasets")
+            if uploads_dir.exists():
+                uploaded = sorted(uploads_dir.iterdir(), reverse=True)
+                if uploaded:
+                    real_data_dir = str(uploaded[0])
+                    self._log("user_dataset", f"Using uploaded dataset: {uploaded[0].name}")
+
+            # Phase 2c: Try downloading from internet if no upload
+            if not real_data_dir and datasets:
+                self._log("phase", "Phase 2b: Downloading dataset from internet")
                 if on_progress:
                     await on_progress("data", f"Downloading: {datasets[0].get('name', '?')}...")
-                real_data_dir = await self._download_dataset(datasets[0])
+                # Try multiple datasets
+                for ds in datasets[:3]:
+                    real_data_dir = await self._download_dataset(ds)
+                    if real_data_dir and list(Path(real_data_dir).glob("*")):
+                        break
+                    real_data_dir = None
 
-            # Phase 2c: Generate synthetic data as supplement/fallback
-            self._log("phase", "Phase 2c: Generating synthetic test data")
-            if on_progress:
-                await on_progress("data", f"Generating {num_samples} synthetic samples...")
+            # Phase 2d: Text-only fallback for unit tests
+            synthetic_dir = None
+            if not real_data_dir:
+                self._log("phase", "Phase 2d: No real data — creating text fallback for unit tests")
+                if on_progress:
+                    await on_progress("data", "No real dataset found. Using text-only fallback. Upload real images via Datasets page.")
+                synthetic_dir = str(self.workspace / "test_data")
+                Path(synthetic_dir).mkdir(exist_ok=True)
+                self._create_minimal_test_data(Path(synthetic_dir), num_samples)
 
-            synthetic_dir = await self._generate_test_data(topic, num_samples)
-
-            # Use real data if available, synthetic as fallback
-            data_dir = real_data_dir if real_data_dir and list(Path(real_data_dir).glob("*")) else synthetic_dir
-            self._log("data_done", f"Test data in {data_dir} (real={real_data_dir is not None})")
+            data_dir = real_data_dir or synthetic_dir
+            has_real_images = real_data_dir is not None and any(
+                Path(real_data_dir).rglob("*.jpg") or Path(real_data_dir).rglob("*.png")
+            ) if real_data_dir else False
+            self._log("data_done", f"Data: {data_dir} (real_images={has_real_images})")
 
             # Phase 3: Implement each hypothesis
             self._log("phase", "Phase 3: Implementing hypotheses")
@@ -314,7 +328,7 @@ class OvernightPipeline:
             output_dir=str(research_dir),
             sources=sources or ["github", "arxiv"],
             max_results_per_source=7,
-            stages=["plan", "search", "filter", "deep_fetch", "analyze", "hypotheses"],
+            stages=["plan", "search", "filter", "deep_fetch", "analyze", "hypotheses", "synthesize"],
         )
         agent = ResearchAgent(config=config, llm=self.llm)
         output_path = await agent.run(topic)
@@ -325,12 +339,28 @@ class OvernightPipeline:
             return json.loads(hyp_path[0].read_text(encoding="utf-8"))
         return {"hypotheses": []}
 
+    async def _generate_fallback_hypotheses(self, topic: str) -> list[dict]:
+        """Fallback: generate hypotheses directly from topic when research yields none."""
+        prompt = f"""\
+Generate 3 implementation hypotheses for: {topic}
+
+Each hypothesis should use specific, real Python libraries.
+Respond with JSON: {{"hypotheses": [{{"id": "H1", "title": "...", "description": "...", \
+"approach": "...", "expected_outcome": "...", "validation_method": "...", "priority": 5, \
+"effort": "medium", "based_on": []}}]}}
+"""
+        raw = await self.llm.generate(prompt, mode=LLMMode.THINKING)
+        data = self._extract_json(raw)
+        hypotheses = data.get("hypotheses", [])
+        self._log("fallback_hypotheses", f"Generated {len(hypotheses)} fallback hypotheses")
+        return hypotheses
+
     # ------------------------------------------------------------------
     # Phase 2a: Dataset search
     # ------------------------------------------------------------------
 
     async def _search_datasets(self, topic: str) -> list[dict]:
-        """Ask LLM to find real datasets, then also search GitHub."""
+        """Search for real datasets via LLM + GitHub API. Fully topic-agnostic."""
         prompt = DATASET_SEARCH_PROMPT.format(task=topic)
         raw = await self.llm.generate(prompt, mode=LLMMode.THINKING)
         data = self._extract_json(raw)
@@ -453,30 +483,12 @@ class OvernightPipeline:
         return str(data_dir)
 
     def _create_minimal_test_data(self, data_dir: Path, count: int) -> None:
-        """Fallback: create minimal synthetic passport data."""
-        import random
-        names = ["ИВАНОВ ИВАН ИВАНОВИЧ", "ПЕТРОВ ПЕТР ПЕТРОВИЧ", "СИДОРОВА МАРИЯ АЛЕКСАНДРОВНА",
-                 "КОЗЛОВ ДМИТРИЙ СЕРГЕЕВИЧ", "НОВИКОВА АННА ВЛАДИМИРОВНА"]
-        for i in range(min(count, 20)):
-            name = random.choice(names)
-            series = f"{random.randint(10,99)} {random.randint(10,99)}"
-            number = f"{random.randint(100000,999999)}"
-            dob = f"{random.randint(1,28):02d}.{random.randint(1,12):02d}.{random.randint(1960,2005)}"
-
-            # Ground truth
-            gt = {"name": name, "series": series, "number": number, "dob": dob}
-
-            # Simulate OCR noise
-            noisy_name = name.replace("О", "0").replace("З", "3") if random.random() > 0.5 else name
-            noisy_number = number.replace("0", "O") if random.random() > 0.5 else number
-            ocr_text = f"ФИО: {noisy_name}\nСерия: {series}\nНомер: {noisy_number}\nДата рождения: {dob}"
-
-            sample_dir = data_dir / f"sample_{i:03d}"
-            sample_dir.mkdir(exist_ok=True)
-            (sample_dir / "ocr_output.txt").write_text(ocr_text, encoding="utf-8")
-            (sample_dir / "ground_truth.json").write_text(
-                json.dumps(gt, ensure_ascii=False, indent=2), encoding="utf-8"
-            )
+        """Fallback: minimal placeholder data. Real data should be uploaded or downloaded."""
+        sample_dir = data_dir / "sample_000"
+        sample_dir.mkdir(exist_ok=True)
+        (sample_dir / "input.txt").write_text("placeholder — upload real dataset via /dashboard/upload-dataset", encoding="utf-8")
+        (sample_dir / "ground_truth.json").write_text('{"note": "placeholder"}', encoding="utf-8")
+        self._log("fallback_data", "No real data. Upload via /dashboard/upload-dataset or provide Kaggle/HuggingFace credentials.")
 
     # ------------------------------------------------------------------
     # Phase 3: Implement + benchmark

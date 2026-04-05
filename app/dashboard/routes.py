@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from uuid import UUID
 
@@ -36,6 +37,66 @@ def _render(template_name: str, **ctx) -> HTMLResponse:
 @router.get("", response_class=HTMLResponse)
 async def dashboard_index(request: Request):
     return _render("runs_list.html")
+
+
+@router.get("/upload-dataset", response_class=HTMLResponse)
+async def upload_dataset_page(request: Request):
+    # List existing datasets
+    datasets = []
+    uploads_dir = Path("uploads/datasets")
+    if uploads_dir.exists():
+        for d in sorted(uploads_dir.iterdir(), reverse=True):
+            if d.is_dir():
+                samples = len(list(d.glob("*")))
+                size_bytes = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+                size = f"{size_bytes / 1024 / 1024:.1f} MB" if size_bytes > 1024*1024 else f"{size_bytes / 1024:.1f} KB"
+                datasets.append({
+                    "name": d.name,
+                    "samples": samples,
+                    "size": size,
+                    "date": datetime.fromtimestamp(d.stat().st_mtime).strftime("%Y-%m-%d %H:%M"),
+                })
+    return _render("upload_dataset.html", datasets=datasets)
+
+
+@router.post("/upload-dataset", response_class=HTMLResponse)
+async def upload_dataset_submit(
+    request: Request,
+    dataset_name: str = Form(...),
+):
+    from datetime import datetime
+    form = await request.form()
+    files = form.getlist("files")
+
+    if not files or not dataset_name.strip():
+        return HTMLResponse('<div style="color: #ef4444;">No files or name provided</div>')
+
+    safe_name = "".join(c if c.isalnum() or c in "-_" else "-" for c in dataset_name.strip())
+    dest = Path("uploads/datasets") / safe_name
+    dest.mkdir(parents=True, exist_ok=True)
+
+    count = 0
+    for file in files:
+        if not hasattr(file, 'filename') or not file.filename:
+            continue
+        content = await file.read()
+        fname = file.filename
+
+        if fname.endswith(".zip"):
+            # Extract ZIP
+            import zipfile as zf
+            import io
+            with zf.ZipFile(io.BytesIO(content)) as z:
+                z.extractall(dest)
+                count += len(z.namelist())
+        else:
+            (dest / fname).write_bytes(content)
+            count += 1
+
+    return HTMLResponse(
+        f'<div style="padding: 0.5rem; background: #052e16; border: 1px solid #166534; border-radius: 0.375rem;">'
+        f'Uploaded {count} files to <code>uploads/datasets/{safe_name}</code></div>'
+    )
 
 
 @router.get("/runs/table", response_class=HTMLResponse)
