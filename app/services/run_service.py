@@ -27,12 +27,20 @@ class InstrumentedAgent(ResearchAgent):
 
     def _log(self, entry: JournalEntry) -> None:
         super()._log(entry)
-        # Fire-and-forget DB write
+        # Fire-and-forget DB write + Redis pub/sub
         try:
             loop = asyncio.get_running_loop()
             loop.create_task(self._persist_event(entry))
+            loop.create_task(self._publish_event(entry))
         except RuntimeError:
             pass
+
+    async def _publish_event(self, entry: JournalEntry) -> None:
+        from app.services.event_bus import publish_event
+        await publish_event(str(self._run_id), {
+            "phase": entry.phase, "action": entry.action,
+            "tool_name": entry.tool_name, "result_summary": entry.result_summary,
+        })
 
     async def _persist_event(self, entry: JournalEntry) -> None:
         if db_session.async_session_factory is None:

@@ -7,9 +7,16 @@ from pydantic import BaseModel
 
 class RunCreate(BaseModel):
     topic: str
+    mode: str = "greenfield"  # greenfield | brownfield
     sources: list[str] | None = None
     max_results_per_source: int | None = None
     verbose: bool = False
+    autonomy_level: str = "full"  # full | semi | advisory
+    repository_url: str | None = None
+    target_files: list[str] | None = None
+    constraints: list[str] | None = None
+    allow_code_changes: str = "none"  # none | sandbox_only | repo
+    refresh_mode: str = "relaxed"  # strict | relaxed
 
 
 class RunResponse(BaseModel):

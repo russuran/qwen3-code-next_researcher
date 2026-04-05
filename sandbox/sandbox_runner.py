@@ -22,6 +22,12 @@ class SandboxJob(BaseModel):
     network_enabled: bool = False
     mount_dir: str = ""
     env_vars: dict[str, str] = {}
+    # Git binding
+    branch_name: str = ""
+    commit_sha: str = ""
+    # Mounted inputs/expected outputs
+    mounted_inputs: list[str] = []
+    expected_outputs: list[str] = []
 
 
 class SandboxResult(BaseModel):

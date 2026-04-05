@@ -1,7 +1,7 @@
-provider: ollama
-model: qwen2.5:14b
-host: http://localhost:11434
-api_key: ""
+provider: openai
+model: gpt-4o
+host: https://bothub.chat/api/v2/openai/v1
+api_key: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjRlMjU5ZGJhLTJhMzMtNGE5ZC1iMmIwLTk0ODY2ODBjZTBhMiIsImlzRGV2ZWxvcGVyIjp0cnVlLCJpYXQiOjE3Njk2MjE4NTAsImV4cCI6MjA4NTE5Nzg1MCwianRpIjoiX2ZTbGVBbTNFMkV5bW0tXyJ9.30SeiGg4Zc-itYZMi2t0dMVNtapm0e6Yqz53yrRJ4As"
 modes:
   thinking:
     temperature: 0.2

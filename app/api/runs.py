@@ -89,7 +89,7 @@ async def get_events(run_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.get("/{run_id}/events/stream")
 async def stream_events(run_id: str, request: Request, db: AsyncSession = Depends(get_db)):
-    """SSE endpoint for live event streaming."""
+    """SSE endpoint via Redis pub/sub with DB fallback."""
     try:
         uid = UUID(run_id)
     except ValueError:
@@ -100,28 +100,50 @@ async def stream_events(run_id: str, request: Request, db: AsyncSession = Depend
         raise HTTPException(status_code=404, detail="Run not found")
 
     async def event_generator():
+        from app.services.event_bus import subscribe_events
+        # First send existing events from DB
         last_id = 0
-        while True:
-            if await request.is_disconnected():
-                break
-            events = await run_service.get_run_events(db, uid)
-            for e in events:
-                if e.id > last_id:
-                    data = json.dumps({
-                        "id": e.id, "phase": e.phase, "action": e.action,
-                        "tool_name": e.tool_name, "result_summary": e.result_summary or "",
-                        "created_at": e.created_at.isoformat() if e.created_at else "",
-                    })
-                    yield f"data: {data}\n\n"
-                    last_id = e.id
+        events = await run_service.get_run_events(db, uid)
+        for e in events:
+            data = json.dumps({
+                "id": e.id, "phase": e.phase, "action": e.action,
+                "tool_name": e.tool_name, "result_summary": e.result_summary or "",
+                "created_at": e.created_at.isoformat() if e.created_at else "",
+            })
+            yield f"data: {data}\n\n"
+            last_id = e.id
 
-            # Check if run is done
-            current_run = await run_service.get_run(db, uid)
-            if current_run and current_run.status in ("completed", "failed", "cancelled"):
-                yield f"data: {json.dumps({'status': current_run.status, 'done': True})}\n\n"
-                break
-
-            await asyncio.sleep(2)
+        # Then stream live events via Redis pub/sub
+        try:
+            async for event_data in subscribe_events(run_id):
+                if await request.is_disconnected():
+                    break
+                yield f"data: {json.dumps(event_data)}\n\n"
+                # Check if run is done
+                current_run = await run_service.get_run(db, uid)
+                if current_run and current_run.status in ("completed", "failed", "cancelled"):
+                    yield f"data: {json.dumps({'status': current_run.status, 'done': True})}\n\n"
+                    break
+        except Exception:
+            # Fallback to polling if Redis unavailable
+            while True:
+                if await request.is_disconnected():
+                    break
+                events = await run_service.get_run_events(db, uid)
+                for e in events:
+                    if e.id > last_id:
+                        data = json.dumps({
+                            "id": e.id, "phase": e.phase, "action": e.action,
+                            "tool_name": e.tool_name, "result_summary": e.result_summary or "",
+                            "created_at": e.created_at.isoformat() if e.created_at else "",
+                        })
+                        yield f"data: {data}\n\n"
+                        last_id = e.id
+                current_run = await run_service.get_run(db, uid)
+                if current_run and current_run.status in ("completed", "failed", "cancelled"):
+                    yield f"data: {json.dumps({'status': current_run.status, 'done': True})}\n\n"
+                    break
+                await asyncio.sleep(2)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 

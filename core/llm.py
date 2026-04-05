@@ -67,6 +67,12 @@ class LLM:
     def _resolve_api_base(self) -> str | None:
         if self.config.provider in ("ollama", "vllm", "lmstudio"):
             return self.config.host
+        # Support custom base URL for cloud providers (e.g. BotHub proxy)
+        if self.config.host and self.config.host not in (
+            "http://localhost:11434", "https://api.openai.com/v1",
+            "https://api.anthropic.com", "",
+        ):
+            return self.config.host
         return None
 
     def _get_mode_config(self, mode: LLMMode) -> ModeConfig:

@@ -32,6 +32,16 @@ class GitVersioning:
         result = self._run("branch", "--show-current", check=False)
         return result.stdout.strip()
 
+    def create_task_branch(self, run_id: str, slug: str = "") -> str:
+        name = f"ai/task/{run_id[:8]}" + (f"-{slug}" if slug else "")
+        return self.create_branch(name)
+
+    def create_variant_branch(self, run_id: str, variant_id: str) -> str:
+        return self.create_branch(f"ai/variant/{run_id[:8]}-{variant_id}")
+
+    def create_explore_branch(self, run_id: str, slug: str = "") -> str:
+        return self.create_branch(f"ai/explore/{run_id[:8]}" + (f"-{slug}" if slug else ""))
+
     def create_branch(self, branch_name: str, checkout: bool = True) -> str:
         self._run("checkout", "-b", branch_name)
         logger.info("Created branch: %s", branch_name)

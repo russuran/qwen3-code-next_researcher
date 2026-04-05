@@ -26,9 +26,11 @@ async def lifespan(app: FastAPI):
     )
     logger.info("Database engine initialized")
 
-    # Init Redis
+    # Init Redis + event bus
     app.state.redis = aioredis.from_url(settings.redis.url, decode_responses=True)
-    logger.info("Redis connected")
+    from app.services.event_bus import init_event_bus
+    init_event_bus(app.state.redis)
+    logger.info("Redis + event bus connected")
 
     yield
 
