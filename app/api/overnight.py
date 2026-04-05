@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from datetime import datetime, timezone
 from uuid import UUID
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -42,7 +45,8 @@ async def start_overnight(
     await db.commit()
     await db.refresh(run)
 
-    asyncio.create_task(_run_overnight(run.id, body, settings))
+    task = asyncio.create_task(_run_overnight(run.id, body, settings))
+    task.add_done_callback(lambda t: logger.error("Overnight task error: %s", t.exception()) if t.exception() else None)
 
     return {
         "run_id": str(run.id),

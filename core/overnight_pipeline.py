@@ -497,9 +497,6 @@ except Exception as e:
             self._log("download_error", f"{name}: {e}")
 
         return None
-        except Exception as e:
-            self._log("download_error", str(e))
-            return None
 
     @staticmethod
     def _extract_json(text: str) -> dict:
