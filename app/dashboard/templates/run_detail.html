@@ -4,38 +4,25 @@
 {% block content %}
 <p class="text-sm"><a href="/dashboard">&larr; All Runs</a></p>
 
-{# === Run Header === #}
+{# === Header === #}
 <div class="card">
-    <div class="flex items-center justify-between flex-wrap" style="gap: 0.75rem;">
+    <div class="flex items-center justify-between flex-wrap" style="gap: 0.5rem;">
         <div style="flex: 1;">
-            <h2 style="margin-bottom: 0.25rem; color: var(--text-bright);">{{ run.topic[:100] }}</h2>
+            <h2 style="margin-bottom: 0.2rem; color: var(--text-bright);">{{ run.topic[:120] }}</h2>
             <div class="flex items-center gap-1 flex-wrap">
                 <span class="badge badge-{{ run.status }}" id="run-status"
                       {% if run.status not in ('completed', 'failed', 'cancelled') %}
                       hx-get="/dashboard/runs/{{ run.id }}/status-badge" hx-trigger="every 3s" hx-swap="outerHTML"
                       {% endif %}>{{ run.status }}</span>
-                {% if run.started_at %}
-                <span class="text-xs text-muted">{{ run.started_at.strftime('%H:%M:%S') }}</span>
-                {% endif %}
-                {% if run.finished_at and run.started_at %}
-                <span class="text-xs text-muted">{{ ((run.finished_at - run.started_at).total_seconds() / 60) | round(1) }}m</span>
-                {% endif %}
+                {% if run.started_at %}<span class="text-xs text-muted">{{ run.started_at.strftime('%H:%M:%S') }}</span>{% endif %}
+                {% if run.finished_at and run.started_at %}<span class="text-xs text-muted">{{ ((run.finished_at - run.started_at).total_seconds() / 60) | round(1) }}m</span>{% endif %}
                 {% if run.status not in ('completed', 'failed', 'cancelled') %}
                 <button class="btn btn-danger btn-sm" hx-post="/dashboard/runs/{{ run.id }}/cancel" hx-swap="none">Cancel</button>
                 {% endif %}
             </div>
         </div>
-        {% if run.status == 'completed' and run.output_dir %}
-        <button class="btn btn-purple btn-sm" hx-post="/dashboard/runs/{{ run.id }}/execute-hypotheses" hx-target="#impl-status" hx-swap="innerHTML">Execute Hypotheses</button>
-        {% endif %}
     </div>
-    {% if run.error %}
-    <div class="mt-1" style="padding: 0.5rem; background: #450a0a; border: 1px solid var(--red); border-radius: 0.375rem; font-size: 0.85rem;">{{ run.error }}</div>
-    {% endif %}
-    {% if run.output_dir %}
-    <div class="mt-1 text-xs text-muted">Output: <code>{{ run.output_dir }}</code></div>
-    {% endif %}
-    <div id="impl-status" class="mt-1"></div>
+    {% if run.error %}<div class="mt-1" style="padding: 0.5rem; background: #450a0a; border: 1px solid var(--red); border-radius: 0.375rem; font-size: 0.85rem;">{{ run.error }}</div>{% endif %}
 </div>
 
 {# === Live Activity === #}
@@ -47,17 +34,106 @@
 </div>
 {% endif %}
 
-{# === Upload Data (when agent needs it) === #}
-{% if run.status not in ('completed', 'failed', 'cancelled') or (run.output_dir and 'overnight' in (run.topic or '')) %}
+{# === Pipeline Nodes === #}
+<div class="card">
+    <h2>Pipeline</h2>
+    <div class="pipeline-graph">
+        {% set stage_info = {
+            'plan': {'label': 'Plan', 'color': '#a78bfa'},
+            'search': {'label': 'Search', 'color': '#38bdf8'},
+            'filter': {'label': 'Filter', 'color': '#06b6d4'},
+            'deep_fetch': {'label': 'Deep Fetch', 'color': '#14b8a6'},
+            'analyze': {'label': 'Analyze', 'color': '#fb923c'},
+            'iterative': {'label': 'Iterate', 'color': '#f59e0b'},
+            'hypotheses': {'label': 'Hypotheses', 'color': '#ec4899'},
+            'contradictions': {'label': 'Contradictions', 'color': '#ef4444'},
+            'synthesize': {'label': 'Synthesize', 'color': '#22c55e'}
+        } %}
+        {% for stage_key, info in stage_info.items() %}
+        {% set count = phase_events.get(stage_key, phase_events.get(stage_key[:4], []))|length if phase_events else 0 %}
+        {% set is_active = count > 0 %}
+        <div class="pipeline-node {% if is_active %}active{% endif %}"
+             style="--node-color: {{ info.color }};"
+             {% if is_active %}
+             hx-get="/dashboard/runs/{{ run.id }}/phase-log/{{ stage_key[:4] if stage_key in ('plan','search','analyze','synthesize') else stage_key[:5] }}"
+             hx-target="#node-logs" hx-swap="innerHTML"
+             {% endif %}>
+            <div class="node-dot" style="background: {{ info.color if is_active else 'var(--border)' }};"></div>
+            <div class="node-label">{{ info.label }}</div>
+            {% if count > 0 %}<div class="node-count">{{ count }}</div>{% endif %}
+        </div>
+        {% if not loop.last %}<div class="pipeline-edge"></div>{% endif %}
+        {% endfor %}
+    </div>
+    <div id="node-logs" class="events-list mt-2" style="max-height: 300px; min-height: 50px; border: 1px solid var(--border); border-radius: 0.375rem; padding: 0.5rem;">
+        <span class="text-dim text-sm">Click a node to view its logs</span>
+    </div>
+</div>
+
+{# === Experiment Graph (Hypotheses) === #}
+{% if hypotheses_data %}
+<div class="card">
+    <h2>Experiment Graph</h2>
+    <div class="experiment-graph">
+        {% for h in hypotheses_data.get('hypotheses', []) %}
+        <div class="experiment-node" style="--exp-color: {% if h.get('status','draft') == 'validated' %}#22c55e{% elif h.get('status','draft') == 'rejected' %}#ef4444{% else %}#64748b{% endif %};">
+            <div class="exp-header">
+                <span class="exp-id">{{ h.get('id', '?') }}</span>
+                <span class="exp-title">{{ h.get('title', '')[:40] }}</span>
+                <span class="badge" style="background: var(--exp-color); color: white;">{{ h.get('status', 'draft') }}</span>
+            </div>
+            <div class="exp-body text-xs text-dim">{{ h.get('description', '')[:100] }}</div>
+            {% if h.get('based_on') %}
+            <div class="exp-refs text-xs text-muted">Based on: {{ h.get('based_on', [])|join(', ') }}</div>
+            {% endif %}
+            <div class="exp-meta text-xs">
+                {% if h.get('priority') %}P{{ h.get('priority') }}{% endif %}
+                {% if h.get('effort') %} | {{ h.get('effort') }}{% endif %}
+            </div>
+        </div>
+        {% endfor %}
+
+        {% if hypotheses_data.get('consensus') %}
+        <div style="margin-top: 0.75rem; padding: 0.5rem; background: #052e16; border: 1px solid var(--green); border-radius: 0.375rem;">
+            <div class="text-xs" style="color: var(--green-text); font-weight: 600;">Consensus ({{ hypotheses_data.get('consensus', [])|length }})</div>
+            {% for c in hypotheses_data.get('consensus', [])[:3] %}
+            <div class="text-xs text-dim">- {{ c }}</div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        {% if hypotheses_data.get('contradictions') %}
+        <div style="margin-top: 0.5rem; padding: 0.5rem; background: #450a0a; border: 1px solid var(--red); border-radius: 0.375rem;">
+            <div class="text-xs" style="color: var(--red-text); font-weight: 600;">Contradictions ({{ hypotheses_data.get('contradictions', [])|length }})</div>
+            {% for c in hypotheses_data.get('contradictions', [])[:3] %}
+            <div class="text-xs text-dim">- {{ c.get('claim_a', '')[:60] }} vs {{ c.get('claim_b', '')[:60] }}</div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        {% if hypotheses_data.get('gaps') %}
+        <div style="margin-top: 0.5rem;">
+            <div class="text-xs text-muted" style="font-weight: 600;">Knowledge Gaps</div>
+            {% for g in hypotheses_data.get('gaps', []) %}
+            <div class="text-xs text-dim">- {{ g }}</div>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
+{# === Upload Data === #}
+{% if run.status not in ('failed', 'cancelled') %}
 <div class="card">
     <div class="card-header">
-        <h2>Upload Data for This Run</h2>
+        <h2>Data</h2>
+        {% if not data_available %}<span class="badge badge-pending">Waiting for upload</span>{% else %}<span class="badge badge-completed">Data available</span>{% endif %}
     </div>
-    <p class="text-xs text-muted mt-1">Agent needs real data for benchmarking. Drop files or a ZIP archive here.</p>
     <form hx-post="/dashboard/runs/{{ run.id }}/upload-data" hx-target="#run-upload-status" hx-swap="innerHTML" hx-encoding="multipart/form-data">
-        <div class="drop-zone mt-1" id="run-drop-zone" onclick="document.getElementById('run-file-input').click()">
-            <div id="run-drop-text">+ Drop files here (images, ZIP, JSON)</div>
-            <input type="file" name="files" id="run-file-input" multiple accept=".zip,.jpg,.jpeg,.png,.json,.txt,.pdf" style="display: none;" onchange="runUpdateFiles(this)">
+        <div class="drop-zone" id="run-drop-zone" onclick="document.getElementById('run-file-input').click()" style="padding: 1.25rem;">
+            <div id="run-drop-text" class="text-sm">+ Drop dataset files here (images, ZIP, JSON)</div>
+            <input type="file" name="files" id="run-file-input" multiple accept=".zip,.jpg,.jpeg,.png,.json,.txt,.pdf,.tar.gz" style="display: none;" onchange="runUpdateFiles(this)">
         </div>
         <div id="run-file-list" class="text-xs text-muted mt-1"></div>
         <button class="btn btn-sm mt-1" type="submit">Upload</button>
@@ -88,10 +164,7 @@ function runUpdateFiles(input) {
         <span class="metric"><span class="metric-value">{{ (metrics.coverage * 100) | round(1) }}%</span><br><span class="metric-label">Coverage</span></span>
         <span class="metric"><span class="metric-value">{{ (metrics.groundedness * 100) | round(1) }}%</span><br><span class="metric-label">Grounded</span></span>
         <span class="metric"><span class="metric-value">{{ (metrics.source_diversity * 100) | round(1) }}%</span><br><span class="metric-label">Diversity</span></span>
-        <span class="metric"><span class="metric-value">{{ (metrics.code_presence * 100) | round(1) }}%</span><br><span class="metric-label">Code</span></span>
-        {% if metrics.sources_registered is defined %}
-        <span class="metric"><span class="metric-value">{{ metrics.sources_registered }}</span><br><span class="metric-label">Sources</span></span>
-        {% endif %}
+        {% if metrics.sources_registered is defined %}<span class="metric"><span class="metric-value">{{ metrics.sources_registered }}</span><br><span class="metric-label">Sources</span></span>{% endif %}
     </div>
 </div>
 {% endif %}
@@ -100,8 +173,8 @@ function runUpdateFiles(input) {
 {% if artifacts %}
 <div class="card">
     <div class="card-header">
-        <h2>Artifacts</h2>
-        <a href="/dashboard/runs/{{ run.id }}/download-all" class="btn btn-outline btn-sm">Download All (ZIP)</a>
+        <h2>Files</h2>
+        <a href="/dashboard/runs/{{ run.id }}/download-all" class="btn btn-outline btn-sm">Download All</a>
     </div>
     <table>
         <thead><tr><th>File</th><th>Phase</th><th>Size</th><th></th></tr></thead>
@@ -109,41 +182,19 @@ function runUpdateFiles(input) {
             {% for a in artifacts %}
             <tr>
                 <td>
-                    {% if not a.filename.endswith('/') %}<a href="/dashboard/runs/{{ run.id }}/view/{{ a.filename }}">{{ a.label }}</a>
-                    {% else %}{{ a.label }}{% endif %}
-                    <span class="text-xs text-muted" style="margin-left: 0.4rem;">{{ a.filename }}</span>
+                    {% if not a.filename.endswith('/') %}<a href="/dashboard/runs/{{ run.id }}/view/{{ a.filename }}">{{ a.label }}</a>{% else %}{{ a.label }}{% endif %}
+                    <span class="text-xs text-muted" style="margin-left: 0.3rem;">{{ a.filename }}</span>
                 </td>
                 <td><span class="badge badge-{{ a.phase }}ing">{{ a.phase }}</span></td>
                 <td class="text-sm text-muted">{% if a.size > 1024 %}{{ (a.size / 1024) | round(1) }} KB{% else %}{{ a.size }} B{% endif %}</td>
-                <td style="white-space: nowrap;">
-                    {% if not a.filename.endswith('/') %}<a href="/dashboard/runs/{{ run.id }}/view/{{ a.filename }}" class="text-sm" style="margin-right: 0.5rem;">View</a>{% endif %}
-                    <a href="{{ a.download_url }}" class="text-sm">Download</a>
+                <td>
+                    {% if not a.filename.endswith('/') %}<a href="/dashboard/runs/{{ run.id }}/view/{{ a.filename }}" class="text-xs">View</a> {% endif %}
+                    <a href="{{ a.download_url }}" class="text-xs">Download</a>
                 </td>
             </tr>
             {% endfor %}
         </tbody>
     </table>
-</div>
-{% endif %}
-
-{# === Phase Logs === #}
-{% if phase_events %}
-<div class="card">
-    <h2>Phase Logs</h2>
-    <div class="tabs">
-        {% for phase_name in ['plan', 'search', 'analyze', 'synthesize'] %}
-        {% if phase_name in phase_events %}
-        <button class="tab {% if loop.first %}active{% endif %}"
-                onclick="this.parentElement.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));this.classList.add('active')"
-                hx-get="/dashboard/runs/{{ run.id }}/phase-log/{{ phase_name }}" hx-target="#phase-log-content" hx-swap="innerHTML"
-                {% if loop.first %}hx-trigger="load"{% endif %}>
-            <span class="tab-dot" style="background: {{ {'plan':'#a78bfa','search':'#38bdf8','analyze':'#fb923c','synthesize':'#22c55e'}[phase_name] }};"></span>
-            {{ phase_name | capitalize }} ({{ phase_events[phase_name] | length }})
-        </button>
-        {% endif %}
-        {% endfor %}
-    </div>
-    <div id="phase-log-content" class="events-list" style="max-height: 350px;">Loading...</div>
 </div>
 {% endif %}
 
@@ -154,24 +205,43 @@ function runUpdateFiles(input) {
          {% if run.status not in ('completed', 'failed', 'cancelled') %}
          hx-get="/dashboard/runs/{{ run.id }}/events-partial" hx-trigger="every 2s" hx-swap="innerHTML"
          {% endif %}>
-        {% for e in events %}
-        <div class="event-item" data-phase="{{ e.phase }}">
+        {% for e in events[-50:] %}
+        <div class="event-item">
             <div class="flex items-center gap-1">
-                <span style="color: {{ {'plan':'#a78bfa','search':'#38bdf8','analyze':'#fb923c','synthesize':'#22c55e'}.get(e.phase,'#94a3b8') }}; font-weight: 700; font-size: 0.78rem;">[{{ e.phase }}]</span>
-                <span class="text-sm">{{ e.action }}</span>
+                <span style="color: {{ {'plan':'#a78bfa','search':'#38bdf8','analyze':'#fb923c','synthesize':'#22c55e'}.get(e.phase,'#94a3b8') }}; font-weight: 700; font-size: 0.75rem;">[{{ e.phase }}]</span>
+                <span class="text-xs">{{ e.action }}</span>
                 {% if e.tool_name %}<span class="text-xs" style="color: #a78bfa;">&gt; {{ e.tool_name }}</span>{% endif %}
                 <span class="text-xs text-muted mono" style="margin-left: auto;">{{ e.created_at.strftime('%H:%M:%S') if e.created_at else '' }}</span>
             </div>
-            {% if e.result_summary %}<div class="text-xs text-dim" style="padding-left: 1rem;">{{ e.result_summary[:150] }}</div>{% endif %}
+            {% if e.result_summary %}<div class="text-xs text-dim" style="padding-left: 0.75rem;">{{ e.result_summary[:120] }}</div>{% endif %}
         </div>
         {% endfor %}
-        {% if not events %}<div class="text-dim" style="padding: 1rem;">Waiting for events...</div>{% endif %}
+        {% if not events %}<div class="text-dim text-sm" style="padding: 0.5rem;">Waiting...</div>{% endif %}
     </div>
 </div>
 
+<style>
+    .pipeline-graph { display: flex; align-items: center; gap: 0; overflow-x: auto; padding: 0.5rem 0; }
+    .pipeline-node { display: flex; flex-direction: column; align-items: center; gap: 0.2rem; padding: 0.5rem; border-radius: 0.5rem; cursor: pointer; min-width: 65px; transition: background 0.15s; }
+    .pipeline-node:hover, .pipeline-node.active { background: rgba(255,255,255,0.05); }
+    .node-dot { width: 12px; height: 12px; border-radius: 50%; }
+    .node-label { font-size: 0.7rem; color: var(--text-dim); white-space: nowrap; }
+    .node-count { font-size: 0.65rem; color: var(--text-muted); }
+    .pipeline-edge { width: 20px; height: 2px; background: var(--border); flex-shrink: 0; }
+
+    .experiment-graph { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+    .experiment-node { background: var(--bg); border: 1px solid var(--border); border-left: 3px solid var(--exp-color); border-radius: 0.375rem; padding: 0.6rem; min-width: 220px; max-width: 350px; flex: 1; }
+    .exp-header { display: flex; align-items: center; gap: 0.4rem; margin-bottom: 0.3rem; }
+    .exp-id { font-weight: 700; color: var(--text-dim); font-size: 0.8rem; }
+    .exp-title { font-size: 0.8rem; color: var(--text); flex: 1; }
+    .exp-body { margin-top: 0.2rem; }
+    .exp-refs { margin-top: 0.2rem; font-style: italic; }
+    .exp-meta { margin-top: 0.3rem; color: var(--text-muted); }
+</style>
+
 <script>
-const observer = new MutationObserver(() => { const el = document.getElementById('events-list'); if (el) el.scrollTop = el.scrollHeight; });
+const obs = new MutationObserver(() => { const el = document.getElementById('events-list'); if (el) el.scrollTop = el.scrollHeight; });
 const el = document.getElementById('events-list');
-if (el) observer.observe(el, { childList: true, subtree: true });
+if (el) obs.observe(el, { childList: true, subtree: true });
 </script>
 {% endblock %}

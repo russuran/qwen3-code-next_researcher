@@ -111,7 +111,6 @@ async def launch_overnight_form(
     request: Request,
     topic: str = Form(...),
     libraries: str = Form("pytesseract, easyocr, Pillow, opencv-python"),
-    num_samples: int = Form(50),
     max_iterations: int = Form(3),
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
@@ -123,7 +122,7 @@ async def launch_overnight_form(
                 "http://localhost:8000/overnight",
                 json={
                     "topic": topic, "libraries": libraries,
-                    "num_samples": num_samples, "max_iterations": max_iterations,
+                    "max_iterations": max_iterations,
                 },
                 timeout=30,
             )
@@ -155,18 +154,27 @@ async def create_run_form(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ):
-    # Parse multi-value checkboxes from form data
     form_data = await request.form()
     sources = form_data.getlist("sources") or ["github", "arxiv"]
     stages = form_data.getlist("stages") or [
         "plan", "search", "filter", "deep_fetch", "analyze",
         "iterative", "hypotheses", "contradictions", "synthesize",
     ]
+    max_iterations = int(form_data.get("max_iterations", 3))
 
-    # Build enriched topic with extra prompt
+    # Handle context file
+    context_text = ""
+    context_file = form_data.get("context_file")
+    if context_file and hasattr(context_file, 'filename') and context_file.filename:
+        content = await context_file.read()
+        context_text = content.decode("utf-8", errors="ignore")[:10000]
+
+    # Build enriched topic
     enriched_topic = topic
     if extra_prompt.strip():
-        enriched_topic = f"{topic}\n\nAdditional instructions: {extra_prompt.strip()}"
+        enriched_topic += f"\n\nAdditional instructions: {extra_prompt.strip()}"
+    if context_text:
+        enriched_topic += f"\n\nContext from attached file ({context_file.filename}):\n{context_text[:5000]}"
 
     body = RunCreate(
         topic=enriched_topic,
@@ -175,15 +183,31 @@ async def create_run_form(
         max_results_per_source=max_results,
     )
 
-    # Store pipeline config in run
     run = await run_service.create_run(db, body)
 
-    # Update run config with stages
+    # Handle dataset file/URL
+    dataset_file = form_data.get("dataset_file")
+    dataset_url = form_data.get("dataset_url", "")
+    if dataset_file and hasattr(dataset_file, 'filename') and dataset_file.filename:
+        dest = Path(run.output_dir or f"output/run-{str(run.id)[:8]}") / "user_data"
+        dest.mkdir(parents=True, exist_ok=True)
+        content = await dataset_file.read()
+        fname = dataset_file.filename
+        if fname.endswith(".zip"):
+            import zipfile as zf_mod
+            import io as io_mod
+            with zf_mod.ZipFile(io_mod.BytesIO(content)) as z:
+                z.extractall(dest)
+        else:
+            (dest / fname).write_bytes(content)
+
     run.config = {
         **(run.config or {}),
         "stages": list(stages),
         "extra_prompt": extra_prompt,
         "original_topic": topic,
+        "max_iterations": max_iterations,
+        "dataset_url": dataset_url.strip(),
     }
     await db.commit()
 
@@ -261,10 +285,27 @@ async def run_detail(request: Request, run_id: str, db: AsyncSession = Depends(g
     for e in events:
         phase_events.setdefault(e.phase, []).append(e)
 
+    # Load hypotheses data
+    hypotheses_data = None
+    if run.output_dir:
+        hyp_path = Path(run.output_dir) / "04_hypotheses.json"
+        if hyp_path.exists():
+            try:
+                hypotheses_data = json.loads(hyp_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+
+    # Check if data is available for benchmark
+    data_available = False
+    if run.output_dir:
+        user_data = Path(run.output_dir) / "user_data"
+        data_available = user_data.exists() and any(user_data.rglob("*.*"))
+
     return _render(
         "run_detail.html",
         run=run, events=events, metrics=metrics,
         artifacts=artifacts, phase_events=phase_events,
+        hypotheses_data=hypotheses_data, data_available=data_available,
     )
 
 
