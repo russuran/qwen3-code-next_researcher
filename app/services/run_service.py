@@ -87,12 +87,12 @@ async def get_run_artifacts(db: AsyncSession, run_id: UUID) -> list[Artifact]:
     return list(result.scalars().all())
 
 
-def start_run_background(run_id: UUID, body: RunCreate, settings: Settings) -> None:
+def start_run_background(run_id: UUID, body: RunCreate, settings: Settings, stages: list[str] | None = None) -> None:
     """Launch agent execution as a background asyncio task."""
-    asyncio.create_task(_execute_run(run_id, body, settings))
+    asyncio.create_task(_execute_run(run_id, body, settings, stages=stages))
 
 
-async def _execute_run(run_id: UUID, body: RunCreate, settings: Settings) -> None:
+async def _execute_run(run_id: UUID, body: RunCreate, settings: Settings, stages: list[str] | None = None) -> None:
     if db_session.async_session_factory is None:
         logger.error("DB not initialized, cannot execute run %s", run_id)
         return
@@ -116,6 +116,7 @@ async def _execute_run(run_id: UUID, body: RunCreate, settings: Settings) -> Non
                 max_results_per_source=body.max_results_per_source or settings.max_results_per_source,
                 verbose=body.verbose,
                 parallel_search=True,
+                stages=stages or AgentConfig().stages,
             )
 
             agent = InstrumentedAgent(

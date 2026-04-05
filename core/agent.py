@@ -123,6 +123,9 @@ def _parse_react(text: str) -> tuple[str | None, dict | None, str | None]:
 # Agent
 # ---------------------------------------------------------------------------
 
+_ALL_STAGES = ["plan", "search", "filter", "deep_fetch", "analyze", "iterative", "hypotheses", "contradictions", "synthesize"]
+
+
 class AgentConfig(BaseModel):
     output_dir: str = "./output"
     journal_dir: str = "./journal"
@@ -131,6 +134,7 @@ class AgentConfig(BaseModel):
     parallel_search: bool = True
     verbose: bool = False
     intervene: bool = False
+    stages: list[str] = _ALL_STAGES
 
 
 class ResearchAgent:
@@ -157,11 +161,15 @@ class ResearchAgent:
         global _llm_ref
         _llm_ref = llm
 
+    def _stage_enabled(self, stage: str) -> bool:
+        return stage in self.config.stages
+
     async def run(self, topic: str) -> Path:
         """Main entry point. Returns path to the output directory."""
-        console.print(Panel(f"[bold]Deep Research:[/bold] {topic}", style="blue"))
+        stages = self.config.stages
+        console.print(Panel(f"[bold]Deep Research:[/bold] {topic}\n[dim]Stages: {', '.join(stages)}[/dim]", style="blue"))
 
-        # Phase 1: Plan
+        # Phase 1: Plan (always runs)
         plan = await self._plan(topic)
         output_dir = Path(self.config.output_dir) / plan.slug
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -175,92 +183,105 @@ class ResearchAgent:
                 return output_dir
 
         # Phase 2: Search
-        findings = await self._search(plan)
-        (output_dir / "02_sources.json").write_text(
-            json.dumps([f.model_dump() for f in findings], ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        findings = []
+        if self._stage_enabled("search"):
+            findings = await self._search(plan)
+            (output_dir / "02_sources.json").write_text(
+                json.dumps([f.model_dump() for f in findings], ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
 
         # Phase 2.5: Relevance filter
-        findings = await self._filter_relevant(plan.topic, findings)
-        (output_dir / "02_filtered.json").write_text(
-            json.dumps([f.model_dump() for f in findings], ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        if self._stage_enabled("filter") and findings:
+            findings = await self._filter_relevant(plan.topic, findings)
+            (output_dir / "02_filtered.json").write_text(
+                json.dumps([f.model_dump() for f in findings], ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
 
-        # Phase 2.7: Deep fetch (PDF, README, code for top results)
-        findings = await self._deep_fetch(findings, output_dir)
+        # Phase 2.7: Deep fetch
+        if self._stage_enabled("deep_fetch") and findings:
+            findings = await self._deep_fetch(findings, output_dir)
 
         if self.config.intervene:
             if not await self._check_intervention("search", plan, findings=findings):
                 return output_dir
 
-        # Phase 3: Deep analyze (with full content)
-        analyses = await self._analyze(findings)
-        summaries_dir = output_dir / "05_summaries"
-        summaries_dir.mkdir(exist_ok=True)
-        for i, a in enumerate(analyses):
-            safe_title = "".join(c if c.isalnum() or c in "-_ " else "_" for c in a.title[:50]).strip()
-            (summaries_dir / f"{i:03d}_{safe_title}.json").write_text(
-                a.model_dump_json(indent=2), encoding="utf-8"
-            )
+        # Phase 3: Analyze
+        analyses = []
+        if self._stage_enabled("analyze") and findings:
+            analyses = await self._analyze(findings)
+            summaries_dir = output_dir / "05_summaries"
+            summaries_dir.mkdir(exist_ok=True)
+            for i, a in enumerate(analyses):
+                safe_title = "".join(c if c.isalnum() or c in "-_ " else "_" for c in a.title[:50]).strip()
+                (summaries_dir / f"{i:03d}_{safe_title}.json").write_text(
+                    a.model_dump_json(indent=2), encoding="utf-8"
+                )
 
-        # Phase 3.5: Iterative deepening — refine plan and do second pass
-        refined_queries = await self.planner.refine_plan(
-            plan,
-            "\n".join(f"- {a.title}: {a.approach[:100]}" for a in analyses[:10]),
-        )
-        if refined_queries:
-            console.print(f"\n[bold]Iterative deepening:[/bold] {len(refined_queries)} refined queries")
-            self._log(JournalEntry(
-                timestamp=self._now(), phase="search",
-                action="iterative_deepening",
-                result_summary=f"{len(refined_queries)} refined queries",
-            ))
-            extra_findings = await self._search_refined(refined_queries)
-            if extra_findings:
-                extra_findings = await self._filter_relevant(plan.topic, extra_findings)
-                extra_analyses = await self._analyze(extra_findings)
-                analyses.extend(extra_analyses)
-                for i, a in enumerate(extra_analyses, len(analyses) - len(extra_analyses)):
-                    safe_title = "".join(c if c.isalnum() or c in "-_ " else "_" for c in a.title[:50]).strip()
-                    (summaries_dir / f"{i:03d}_{safe_title}.json").write_text(
-                        a.model_dump_json(indent=2), encoding="utf-8"
-                    )
+        # Phase 3.5: Iterative deepening
+        if self._stage_enabled("iterative") and analyses:
+            refined_queries = await self.planner.refine_plan(
+                plan,
+                "\n".join(f"- {a.title}: {a.approach[:100]}" for a in analyses[:10]),
+            )
+            if refined_queries:
+                console.print(f"\n[bold]Iterative deepening:[/bold] {len(refined_queries)} refined queries")
+                self._log(JournalEntry(
+                    timestamp=self._now(), phase="search",
+                    action="iterative_deepening",
+                    result_summary=f"{len(refined_queries)} refined queries",
+                ))
+                extra_findings = await self._search_refined(refined_queries)
+                if extra_findings:
+                    if self._stage_enabled("filter"):
+                        extra_findings = await self._filter_relevant(plan.topic, extra_findings)
+                    extra_analyses = await self._analyze(extra_findings)
+                    analyses.extend(extra_analyses)
+                    summaries_dir = output_dir / "05_summaries"
+                    summaries_dir.mkdir(exist_ok=True)
+                    for i, a in enumerate(extra_analyses, len(analyses) - len(extra_analyses)):
+                        safe_title = "".join(c if c.isalnum() or c in "-_ " else "_" for c in a.title[:50]).strip()
+                        (summaries_dir / f"{i:03d}_{safe_title}.json").write_text(
+                            a.model_dump_json(indent=2), encoding="utf-8"
+                        )
 
         # Phase 3.7: Hypothesis generation
-        hypotheses = await self._generate_hypotheses(plan, analyses)
-        (output_dir / "04_hypotheses.json").write_text(
-            json.dumps(hypotheses, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-
-        # Phase 3.8: Contradiction detection
-        console.print("\n[bold]Phase 3.8:[/bold] Detecting contradictions...")
-        self._log(JournalEntry(
-            timestamp=self._now(), phase="analyze",
-            action="contradiction_detection", result_summary="Checking cross-source contradictions",
-        ))
-        try:
-            source_dicts = [a.model_dump(exclude={"raw_source"}) for a in analyses[:15]]
-            contradictions = await self.claim_verifier.detect_contradictions(source_dicts)
-            c_count = len(contradictions.get("contradictions", []))
-            consensus_count = len(contradictions.get("consensus", []))
-            console.print(f"  Found {c_count} contradictions, {consensus_count} consensus points")
-            self._log(JournalEntry(
-                timestamp=self._now(), phase="analyze",
-                action="contradictions_found",
-                result_summary=f"{c_count} contradictions, {consensus_count} consensus",
-            ))
-            hypotheses["contradictions"] = contradictions.get("contradictions", [])
-            hypotheses["consensus"] = contradictions.get("consensus", [])
-            # Update hypotheses file
+        hypotheses = {}
+        if self._stage_enabled("hypotheses") and analyses:
+            hypotheses = await self._generate_hypotheses(plan, analyses)
             (output_dir / "04_hypotheses.json").write_text(
                 json.dumps(hypotheses, ensure_ascii=False, indent=2), encoding="utf-8"
             )
-        except Exception as e:
-            logger.warning("Contradiction detection failed: %s", e)
 
-        # Phase 4: Synthesize (with hypotheses)
+        # Phase 3.8: Contradiction detection
+        if self._stage_enabled("contradictions") and analyses:
+            console.print("\n[bold]Phase 3.8:[/bold] Detecting contradictions...")
+            self._log(JournalEntry(
+                timestamp=self._now(), phase="analyze",
+                action="contradiction_detection", result_summary="Checking cross-source contradictions",
+            ))
+            try:
+                source_dicts = [a.model_dump(exclude={"raw_source"}) for a in analyses[:15]]
+                contradictions = await self.claim_verifier.detect_contradictions(source_dicts)
+                c_count = len(contradictions.get("contradictions", []))
+                consensus_count = len(contradictions.get("consensus", []))
+                console.print(f"  Found {c_count} contradictions, {consensus_count} consensus points")
+                self._log(JournalEntry(
+                    timestamp=self._now(), phase="analyze",
+                    action="contradictions_found",
+                    result_summary=f"{c_count} contradictions, {consensus_count} consensus",
+                ))
+                hypotheses["contradictions"] = contradictions.get("contradictions", [])
+                hypotheses["consensus"] = contradictions.get("consensus", [])
+                if hypotheses:
+                    (output_dir / "04_hypotheses.json").write_text(
+                        json.dumps(hypotheses, ensure_ascii=False, indent=2), encoding="utf-8"
+                    )
+            except Exception as e:
+                logger.warning("Contradiction detection failed: %s", e)
+
+        # Phase 4: Synthesize
         report_path = await self._synthesize(plan, analyses, output_dir, hypotheses)
 
         console.print(Panel(

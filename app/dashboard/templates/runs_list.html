@@ -2,13 +2,73 @@
 {% block title %}Runs — Researcher{% endblock %}
 {% block content %}
 <h2>New Research</h2>
-<form hx-post="/dashboard/runs" hx-target="#runs-table" hx-swap="innerHTML" hx-indicator="#spinner">
-    <div class="form-row">
-        <input type="text" name="topic" placeholder="Research topic..." required>
-        <button class="btn" type="submit">Start Run</button>
-        <span id="spinner" class="htmx-indicator">Starting...</span>
-    </div>
-</form>
+<div class="card">
+    <form hx-post="/dashboard/runs" hx-target="#runs-table" hx-swap="innerHTML" hx-indicator="#spinner">
+        <div class="form-row">
+            <input type="text" name="topic" placeholder="Research topic..." required style="flex: 2;">
+            <button class="btn" type="submit">Start Run</button>
+            <span id="spinner" class="htmx-indicator">Starting...</span>
+        </div>
+
+        <div style="margin-top: 0.75rem;">
+            <div onclick="document.getElementById('advanced-opts').classList.toggle('hidden')" style="cursor: pointer; color: #64748b; font-size: 0.85rem; user-select: none;">
+                &#9662; Advanced options
+            </div>
+            <div id="advanced-opts" class="hidden">
+                <div style="margin-top: 0.75rem;">
+                    <label class="form-label">Additional instructions</label>
+                    <textarea name="extra_prompt" rows="3" placeholder="Focus on Python implementations only... / Compare performance benchmarks... / Include code examples..." style="width: 100%; background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; padding: 0.5rem; font-size: 0.85rem; resize: vertical;"></textarea>
+                </div>
+
+                <div style="margin-top: 0.75rem;">
+                    <label class="form-label">Pipeline stages</label>
+                    <div style="display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.35rem;">
+                        <label class="stage-check"><input type="checkbox" name="stages" value="plan" checked> Plan</label>
+                        <label class="stage-check"><input type="checkbox" name="stages" value="search" checked> Search</label>
+                        <label class="stage-check"><input type="checkbox" name="stages" value="filter" checked> Relevance Filter</label>
+                        <label class="stage-check"><input type="checkbox" name="stages" value="deep_fetch" checked> Deep Fetch (PDF/Code)</label>
+                        <label class="stage-check"><input type="checkbox" name="stages" value="analyze" checked> Analyze</label>
+                        <label class="stage-check"><input type="checkbox" name="stages" value="iterative" checked> Iterative Deepening</label>
+                        <label class="stage-check"><input type="checkbox" name="stages" value="hypotheses" checked> Hypotheses</label>
+                        <label class="stage-check"><input type="checkbox" name="stages" value="contradictions" checked> Contradiction Detection</label>
+                        <label class="stage-check"><input type="checkbox" name="stages" value="synthesize" checked> Synthesize</label>
+                    </div>
+                </div>
+
+                <div style="margin-top: 0.75rem; display: flex; gap: 1rem; flex-wrap: wrap;">
+                    <div>
+                        <label class="form-label">Sources</label>
+                        <div style="display: flex; gap: 0.5rem; margin-top: 0.35rem;">
+                            <label class="stage-check"><input type="checkbox" name="sources" value="github" checked> GitHub</label>
+                            <label class="stage-check"><input type="checkbox" name="sources" value="arxiv" checked> arXiv</label>
+                            <label class="stage-check"><input type="checkbox" name="sources" value="semantic_scholar"> Semantic Scholar</label>
+                            <label class="stage-check"><input type="checkbox" name="sources" value="papers_with_code"> Papers With Code</label>
+                        </div>
+                    </div>
+                    <div>
+                        <label class="form-label">Results per source</label>
+                        <input type="number" name="max_results" value="7" min="1" max="30" style="width: 70px; background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; padding: 0.4rem; font-size: 0.85rem;">
+                    </div>
+                    <div>
+                        <label class="form-label">Mode</label>
+                        <select name="mode" style="background: #0f172a; border: 1px solid #334155; border-radius: 0.375rem; color: #e2e8f0; padding: 0.4rem; font-size: 0.85rem;">
+                            <option value="greenfield" selected>Greenfield (research)</option>
+                            <option value="brownfield">Brownfield (repo mod)</option>
+                        </select>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </form>
+</div>
+
+<style>
+    .hidden { display: none; }
+    .form-label { display: block; font-size: 0.8rem; color: #94a3b8; margin-bottom: 0.15rem; }
+    .stage-check { display: inline-flex; align-items: center; gap: 0.3rem; background: #1e293b; border: 1px solid #334155; padding: 0.3rem 0.6rem; border-radius: 0.25rem; font-size: 0.8rem; color: #cbd5e1; cursor: pointer; user-select: none; }
+    .stage-check:hover { border-color: #475569; }
+    .stage-check input[type="checkbox"] { accent-color: #2563eb; }
+</style>
 
 <h2>Runs</h2>
 <div id="runs-table" hx-get="/dashboard/runs/table" hx-trigger="load, every 5s" hx-swap="innerHTML">

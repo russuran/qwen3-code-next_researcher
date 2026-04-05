@@ -49,12 +49,45 @@ async def runs_table(request: Request, db: AsyncSession = Depends(get_db)):
 async def create_run_form(
     request: Request,
     topic: str = Form(...),
+    extra_prompt: str = Form(""),
+    mode: str = Form("greenfield"),
+    max_results: int = Form(7),
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
 ):
-    body = RunCreate(topic=topic)
+    # Parse multi-value checkboxes from form data
+    form_data = await request.form()
+    sources = form_data.getlist("sources") or ["github", "arxiv"]
+    stages = form_data.getlist("stages") or [
+        "plan", "search", "filter", "deep_fetch", "analyze",
+        "iterative", "hypotheses", "contradictions", "synthesize",
+    ]
+
+    # Build enriched topic with extra prompt
+    enriched_topic = topic
+    if extra_prompt.strip():
+        enriched_topic = f"{topic}\n\nAdditional instructions: {extra_prompt.strip()}"
+
+    body = RunCreate(
+        topic=enriched_topic,
+        mode=mode,
+        sources=list(sources),
+        max_results_per_source=max_results,
+    )
+
+    # Store pipeline config in run
     run = await run_service.create_run(db, body)
-    run_service.start_run_background(run.id, body, settings)
+
+    # Update run config with stages
+    run.config = {
+        **(run.config or {}),
+        "stages": list(stages),
+        "extra_prompt": extra_prompt,
+        "original_topic": topic,
+    }
+    await db.commit()
+
+    run_service.start_run_background(run.id, body, settings, stages=list(stages))
 
     # Return updated table
     result = await db.execute(select(Run).order_by(Run.created_at.desc()).limit(50))
