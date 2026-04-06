@@ -453,50 +453,100 @@ except Exception as e:
         smoke_path = impl_dir / "smoke_test.py"
         smoke_path.write_text(smoke_script)
 
-        # Run smoke test in Docker sandbox
+        # Run smoke test in Docker sandbox with self-healing
         import subprocess
         passed = False
         output = ""
-        try:
-            # Build command: install deps + run smoke test
-            docker_cmd = [
-                "docker", "run", "--rm",
-                "-v", f"{impl_dir.resolve()}:/workspace",
-                "-w", "/workspace",
-                "--network", "none",
-                "--memory", "2g",
-                "--cpus", "2",
-                "python:3.11-slim",
-                "sh", "-c",
-                "pip install -q -r requirements.txt 2>/dev/null; python smoke_test.py"
-            ]
-            result = subprocess.run(
-                docker_cmd,
-                capture_output=True, text=True, timeout=180,
-            )
-            passed = result.returncode == 0
-            output = result.stdout.strip()[:200] + result.stderr.strip()[:200]
-            self._log("smoke_test",
-                       f"{'PASS' if passed else 'FAIL'} (docker): {hyp.get('title','')} — {output[:80]}")
-        except FileNotFoundError:
-            # Docker not available, try locally
-            self._log("smoke_test_fallback", "Docker not available, running locally")
+        last_error = ""
+        max_fix_attempts = 10
+
+        for attempt in range(max_fix_attempts):
             try:
-                result = subprocess.run(
-                    [sys.executable, str(smoke_path)],
-                    capture_output=True, text=True, timeout=60,
-                    env={**os.environ, "PYTHONPATH": str(impl_dir)},
-                )
+                # Docker needs network for pip install
+                docker_cmd = [
+                    "docker", "run", "--rm",
+                    "-v", f"{impl_dir.resolve()}:/workspace",
+                    "-w", "/workspace",
+                    "--memory", "4g", "--cpus", "2",
+                    "python:3.11-slim",
+                    "sh", "-c",
+                    "apt-get update -qq && apt-get install -y -qq tesseract-ocr libgl1-mesa-glx libglib2.0-0 > /dev/null 2>&1; "
+                    "pip install -q -r requirements.txt 2>&1; python smoke_test.py"
+                ]
+                result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=300)
+                output = result.stdout.strip()[-500:] + "\n" + result.stderr.strip()[-500:]
                 passed = result.returncode == 0
-                output = result.stdout.strip()[:200] + result.stderr.strip()[:200]
-                self._log("smoke_test",
-                           f"{'PASS' if passed else 'FAIL'} (local): {hyp.get('title','')} — {output[:80]}")
+
+                if passed:
+                    self._log("smoke_test", f"PASS (attempt {attempt+1}): {hyp.get('title','')}")
+                    break
+
+                # Check if same error as before (loop detection)
+                current_error = output[-200:]
+                if current_error == last_error:
+                    self._log("smoke_test", f"STUCK (same error x2): {hyp.get('title','')} — {output[-80:]}")
+                    break
+                last_error = current_error
+
+                # Self-heal: ask LLM to fix the error
+                self._log("smoke_fix", f"Attempt {attempt+1} failed, asking LLM to fix: {output[-100:]}")
+                fix_prompt = f"""The following Python code failed in a Docker container (python:3.11-slim).
+
+Error output:
+{output[-1000:]}
+
+Current requirements.txt:
+{(impl_dir / 'requirements.txt').read_text()}
+
+Current implementation.py (first 100 lines):
+{(impl_dir / 'implementation.py').read_text()[:3000]}
+
+Fix the issue. Common fixes:
+- Replace opencv-python with opencv-python-headless
+- Add missing system packages to requirements
+- Fix import errors in the code
+- Handle missing optional dependencies gracefully
+
+Respond with TWO code blocks:
+1. ```requirements``` — updated requirements.txt
+2. ```python``` — updated implementation.py
+"""
+                fix_response = await self.llm.generate(fix_prompt, mode=LLMMode.THINKING)
+
+                # Extract and apply fixes
+                blocks = fix_response.split("```")
+                for i, block in enumerate(blocks[1::2]):
+                    block = block.strip()
+                    if block.startswith("requirements"):
+                        new_reqs = block.split("\n", 1)[1].strip() if "\n" in block else block
+                        (impl_dir / "requirements.txt").write_text(new_reqs + "\n")
+                        self._log("smoke_fix", f"Updated requirements.txt")
+                    elif block.startswith("python"):
+                        new_code = block[6:].strip()
+                        if len(new_code) > 50:  # sanity check
+                            (impl_dir / "implementation.py").write_text(new_code)
+                            self._log("smoke_fix", f"Updated implementation.py")
+
+            except FileNotFoundError:
+                self._log("smoke_test_fallback", "Docker not available, running locally")
+                try:
+                    result = subprocess.run(
+                        [sys.executable, str(smoke_path)],
+                        capture_output=True, text=True, timeout=60,
+                        env={**os.environ, "PYTHONPATH": str(impl_dir)},
+                    )
+                    passed = result.returncode == 0
+                    output = result.stdout.strip()[:200] + result.stderr.strip()[:200]
+                except Exception as e:
+                    output = str(e)
+                self._log("smoke_test", f"{'PASS' if passed else 'FAIL'} (local): {hyp.get('title','')}")
+                break
+            except subprocess.TimeoutExpired:
+                self._log("smoke_test", f"TIMEOUT attempt {attempt+1}: {hyp.get('title','')}")
+                break
             except Exception as e:
-                self._log("smoke_test", f"FAIL: {hyp.get('title','')} — {e}")
-        except subprocess.TimeoutExpired:
-            self._log("smoke_test", f"TIMEOUT: {hyp.get('title','')}")
-        except Exception as e:
-            self._log("smoke_test", f"FAIL: {hyp.get('title','')} — {e}")
+                self._log("smoke_test", f"ERROR attempt {attempt+1}: {e}")
+                break
 
         # Git init
         from repo_adaptation.git_versioning import GitVersioning

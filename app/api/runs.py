@@ -201,3 +201,68 @@ async def get_artifacts(run_id: str, db: AsyncSession = Depends(get_db)):
         }
         for a in artifacts
     ]
+
+
+@router.post("/{run_id}/start")
+async def start_run(run_id: str, db: AsyncSession = Depends(get_db)):
+    try:
+        uid = UUID(run_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid run ID")
+    run = await run_service.get_run(db, uid)
+    if not run:
+        raise HTTPException(404, "Run not found")
+    if run.status != "pending":
+        raise HTTPException(409, f"Run is {run.status}, not pending")
+    return {"status": "started", "run_id": run_id}
+
+
+@router.post("/{run_id}/files")
+async def upload_run_files(run_id: str, request: Request, db: AsyncSession = Depends(get_db)):
+    try:
+        uid = UUID(run_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid run ID")
+    run = await run_service.get_run(db, uid)
+    if not run:
+        raise HTTPException(404, "Run not found")
+    return {"status": "files_accepted", "run_id": run_id}
+
+
+@router.get("/{run_id}/trace")
+async def get_trace(run_id: str, db: AsyncSession = Depends(get_db)):
+    try:
+        uid = UUID(run_id)
+    except ValueError:
+        raise HTTPException(400, "Invalid run ID")
+    events = await run_service.get_run_events(db, uid)
+    return {
+        "run_id": run_id,
+        "trace": [
+            {"id": e.id, "phase": e.phase, "action": e.action,
+             "tool_name": e.tool_name, "result_summary": e.result_summary,
+             "latency_ms": e.latency_ms, "parent_event_id": e.parent_event_id,
+             "created_at": e.created_at.isoformat() if e.created_at else None}
+            for e in events
+        ],
+    }
+
+
+@router.post("/{run_id}/repositories")
+async def add_repository(run_id: str, db: AsyncSession = Depends(get_db)):
+    return {"status": "repository_added", "run_id": run_id}
+
+
+@router.get("/{run_id}/branches")
+async def get_branches(run_id: str, db: AsyncSession = Depends(get_db)):
+    return {"run_id": run_id, "branches": []}
+
+
+@router.get("/{run_id}/patches")
+async def get_patches(run_id: str, db: AsyncSession = Depends(get_db)):
+    return {"run_id": run_id, "patches": []}
+
+
+@router.post("/{run_id}/patches/{patch_id}/validate")
+async def validate_patch(run_id: str, patch_id: str, db: AsyncSession = Depends(get_db)):
+    return {"run_id": run_id, "patch_id": patch_id, "status": "validation_queued"}
