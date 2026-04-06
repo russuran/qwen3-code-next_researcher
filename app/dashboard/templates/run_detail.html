@@ -68,53 +68,170 @@
 {% if hypotheses_data %}
 <div class="card">
     <h2>Experiment Graph</h2>
-    <div class="experiment-graph">
-        {% for h in hypotheses_data.get('hypotheses', []) %}
-        <div class="experiment-node" style="--exp-color: {% if h.get('status','draft') == 'validated' %}#22c55e{% elif h.get('status','draft') == 'rejected' %}#ef4444{% else %}#64748b{% endif %};">
-            <div class="exp-header">
-                <span class="exp-id">{{ h.get('id', '?') }}</span>
-                <span class="exp-title">{{ h.get('title', '')[:40] }}</span>
-                <span class="badge" style="background: var(--exp-color); color: white;">{{ h.get('status', 'draft') }}</span>
-            </div>
-            <div class="exp-body text-xs text-dim">{{ h.get('description', '')[:100] }}</div>
-            {% if h.get('based_on') %}
-            <div class="exp-refs text-xs text-muted">Based on: {{ h.get('based_on', [])|join(', ') }}</div>
-            {% endif %}
-            <div class="exp-meta text-xs">
-                {% if h.get('priority') %}P{{ h.get('priority') }}{% endif %}
-                {% if h.get('effort') %} | {{ h.get('effort') }}{% endif %}
-            </div>
-        </div>
-        {% endfor %}
+    <div class="canvas-container" id="exp-canvas-container">
+        <canvas id="exp-canvas" width="900" height="400"></canvas>
+    </div>
 
+    <div class="flex flex-wrap mt-2" style="gap: 0.5rem;">
         {% if hypotheses_data.get('consensus') %}
-        <div style="margin-top: 0.75rem; padding: 0.5rem; background: #052e16; border: 1px solid var(--green); border-radius: 0.375rem;">
-            <div class="text-xs" style="color: var(--green-text); font-weight: 600;">Consensus ({{ hypotheses_data.get('consensus', [])|length }})</div>
+        <div style="flex: 1; min-width: 200px; padding: 0.5rem; background: #052e16; border: 1px solid var(--green); border-radius: 0.375rem;">
+            <div class="text-xs" style="color: var(--green-text); font-weight: 600;">Consensus</div>
             {% for c in hypotheses_data.get('consensus', [])[:3] %}
-            <div class="text-xs text-dim">- {{ c }}</div>
+            <div class="text-xs text-dim">- {{ c[:80] }}</div>
             {% endfor %}
         </div>
         {% endif %}
-
         {% if hypotheses_data.get('contradictions') %}
-        <div style="margin-top: 0.5rem; padding: 0.5rem; background: #450a0a; border: 1px solid var(--red); border-radius: 0.375rem;">
-            <div class="text-xs" style="color: var(--red-text); font-weight: 600;">Contradictions ({{ hypotheses_data.get('contradictions', [])|length }})</div>
+        <div style="flex: 1; min-width: 200px; padding: 0.5rem; background: #450a0a; border: 1px solid var(--red); border-radius: 0.375rem;">
+            <div class="text-xs" style="color: var(--red-text); font-weight: 600;">Contradictions</div>
             {% for c in hypotheses_data.get('contradictions', [])[:3] %}
-            <div class="text-xs text-dim">- {{ c.get('claim_a', '')[:60] }} vs {{ c.get('claim_b', '')[:60] }}</div>
+            <div class="text-xs text-dim">- {{ (c.get('claim_a', '') if c is mapping else c)[:80] }}</div>
             {% endfor %}
         </div>
         {% endif %}
-
         {% if hypotheses_data.get('gaps') %}
-        <div style="margin-top: 0.5rem;">
+        <div style="flex: 1; min-width: 200px; padding: 0.5rem; background: var(--bg); border: 1px solid var(--border); border-radius: 0.375rem;">
             <div class="text-xs text-muted" style="font-weight: 600;">Knowledge Gaps</div>
             {% for g in hypotheses_data.get('gaps', []) %}
-            <div class="text-xs text-dim">- {{ g }}</div>
+            <div class="text-xs text-dim">- {{ g[:80] }}</div>
             {% endfor %}
         </div>
         {% endif %}
     </div>
 </div>
+
+<style>
+    .canvas-container { position: relative; overflow-x: auto; background: var(--bg); border: 1px solid var(--border); border-radius: 0.375rem; }
+    #exp-canvas { display: block; }
+</style>
+
+<script>
+(function() {
+    const hypotheses = {{ hypotheses_data.get('hypotheses', []) | tojson }};
+    const canvas = document.getElementById('exp-canvas');
+    if (!canvas || !hypotheses.length) return;
+    const ctx = canvas.getContext('2d');
+
+    const W = Math.max(900, hypotheses.length * 280);
+    const H = 400;
+    canvas.width = W;
+    canvas.height = H;
+
+    const colors = {
+        validated: '#22c55e', rejected: '#ef4444', draft: '#64748b',
+        running: '#3b82f6', combined: '#a855f7'
+    };
+
+    // Layout nodes
+    const nodes = [];
+    const nodeW = 220, nodeH = 100, gapX = 40, startY = 40;
+    let x = 30;
+    hypotheses.forEach((h, i) => {
+        nodes.push({
+            x: x, y: startY + (i % 2) * 160,
+            w: nodeW, h: nodeH,
+            id: h.id || ('H' + (i+1)),
+            title: (h.title || '').substring(0, 30),
+            status: h.status || 'draft',
+            priority: h.priority || 0,
+            effort: h.effort || '',
+            based_on: h.based_on || [],
+            desc: (h.description || '').substring(0, 60),
+        });
+        x += nodeW + gapX;
+    });
+
+    // Draw edges (based_on connections)
+    ctx.lineWidth = 2;
+    nodes.forEach(node => {
+        node.based_on.forEach(ref => {
+            // Find source node by title match
+            const src = nodes.find(n => ref.toLowerCase().includes(n.title.toLowerCase().substring(0, 15)));
+            if (src && src !== node) {
+                const from = { x: src.x + src.w, y: src.y + src.h / 2 };
+                const to = { x: node.x, y: node.y + node.h / 2 };
+                ctx.strokeStyle = '#475569';
+                ctx.setLineDash([4, 4]);
+                ctx.beginPath();
+                ctx.moveTo(from.x, from.y);
+                // Bezier curve
+                const cpX = (from.x + to.x) / 2;
+                ctx.bezierCurveTo(cpX, from.y, cpX, to.y, to.x, to.y);
+                ctx.stroke();
+                ctx.setLineDash([]);
+                // Arrow
+                const angle = Math.atan2(to.y - from.y, to.x - cpX);
+                ctx.fillStyle = '#475569';
+                ctx.beginPath();
+                ctx.moveTo(to.x, to.y);
+                ctx.lineTo(to.x - 8 * Math.cos(angle - 0.4), to.y - 8 * Math.sin(angle - 0.4));
+                ctx.lineTo(to.x - 8 * Math.cos(angle + 0.4), to.y - 8 * Math.sin(angle + 0.4));
+                ctx.fill();
+            }
+        });
+    });
+
+    // Draw nodes
+    nodes.forEach(node => {
+        const color = colors[node.status] || colors.draft;
+        // Card background
+        ctx.fillStyle = '#1e293b';
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2;
+        roundRect(ctx, node.x, node.y, node.w, node.h, 8);
+        ctx.fill();
+        ctx.stroke();
+        // Left accent bar
+        ctx.fillStyle = color;
+        roundRect(ctx, node.x, node.y, 4, node.h, 2);
+        ctx.fill();
+        // ID badge
+        ctx.fillStyle = color;
+        ctx.font = 'bold 11px system-ui';
+        ctx.fillText(node.id, node.x + 12, node.y + 18);
+        // Status badge
+        ctx.fillStyle = color + '33';
+        roundRect(ctx, node.x + node.w - 70, node.y + 6, 60, 16, 8);
+        ctx.fill();
+        ctx.fillStyle = color;
+        ctx.font = '9px system-ui';
+        ctx.textAlign = 'center';
+        ctx.fillText(node.status.toUpperCase(), node.x + node.w - 40, node.y + 17);
+        ctx.textAlign = 'left';
+        // Title
+        ctx.fillStyle = '#e2e8f0';
+        ctx.font = '12px system-ui';
+        ctx.fillText(node.title, node.x + 12, node.y + 38);
+        // Description
+        ctx.fillStyle = '#94a3b8';
+        ctx.font = '10px system-ui';
+        ctx.fillText(node.desc.substring(0, 35), node.x + 12, node.y + 56);
+        if (node.desc.length > 35) ctx.fillText(node.desc.substring(35, 65), node.x + 12, node.y + 69);
+        // Meta
+        ctx.fillStyle = '#64748b';
+        ctx.font = '9px system-ui';
+        let meta = '';
+        if (node.priority) meta += 'P' + node.priority;
+        if (node.effort) meta += ' | ' + node.effort;
+        ctx.fillText(meta, node.x + 12, node.y + node.h - 8);
+    });
+
+    function roundRect(ctx, x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+        ctx.lineTo(x + r, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+        ctx.lineTo(x, y + r);
+        ctx.quadraticCurveTo(x, y, x + r, y);
+        ctx.closePath();
+    }
+})();
+</script>
+{% endif %}
 {% endif %}
 
 {# === Upload Data === #}
