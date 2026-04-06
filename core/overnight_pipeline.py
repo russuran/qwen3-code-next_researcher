@@ -74,20 +74,26 @@ Output ONLY Python code in ```python ... ```
 REAL_BENCHMARK_PROMPT = """\
 You are a QA engineer. Write a benchmark script for {title}.
 
+Data is mounted at `/data` inside the Docker container.
+Dataset structure:
+{data_structure}
+
 The benchmark must:
-- Load test data from `test_data/` directory
-- Run the implementation's `run()` function on each sample
-- Compare output to ground truth
-- Calculate REAL metrics:
+- Scan `/data` directory recursively for input files (images: *.jpg, *.png; text: *.txt, *.json)
+- For each input file, call the implementation's `run(file_path)` function
+- If ground_truth.json exists next to the input, compare output to it
+- Calculate metrics:
   - Character Error Rate (CER): edit_distance(predicted, actual) / len(actual)
   - Field-level accuracy: exact match per field
   - Overall accuracy: all fields correct
   - Processing time per sample
-- Save results to `benchmark_results.json`
-- Use pytest for test assertions
+  - Total samples processed
+- Save results to `benchmark_results.json` in current directory
+- Use pytest with at least one assertion (e.g. assert total_samples > 0)
+- If no data found at `/data`, scan current directory and `/workspace` as fallback
 
-Required imports: pytest, json, time, pathlib
-Use Levenshtein distance for CER (implement inline if python-Levenshtein not available).
+Required imports: pytest, json, time, pathlib, os
+Implement Levenshtein distance inline (do not import external package).
 
 Output ONLY Python code in ```python ... ```
 """
@@ -778,8 +784,26 @@ except Exception as e:
         code = self._extract_code(await self.llm.generate(prompt, mode=LLMMode.THINKING))
         (impl_dir / "implementation.py").write_text(code, encoding="utf-8")
 
+        # Scan dataset structure for benchmark prompt
+        data_dir = self._find_real_data()
+        data_structure = "No data directory found. Use /workspace/smoke_test/ as fallback."
+        if data_dir:
+            try:
+                files = list(Path(data_dir).rglob("*.*"))[:20]
+                exts = {}
+                for f in files:
+                    exts[f.suffix] = exts.get(f.suffix, 0) + 1
+                total = len(list(Path(data_dir).rglob("*.*")))
+                sample = [str(f.relative_to(data_dir)) for f in files[:5]]
+                data_structure = f"Total files: {total}\nExtensions: {exts}\nSample paths: {sample}"
+            except Exception:
+                pass
+
         # Generate benchmark
-        bench_prompt = REAL_BENCHMARK_PROMPT.format(title=hyp.get("title", ""))
+        bench_prompt = REAL_BENCHMARK_PROMPT.format(
+            title=hyp.get("title", ""),
+            data_structure=data_structure,
+        )
         bench_code = self._extract_code(await self.llm.generate(bench_prompt, mode=LLMMode.THINKING))
         (impl_dir / "test_benchmark.py").write_text(bench_code, encoding="utf-8")
 
