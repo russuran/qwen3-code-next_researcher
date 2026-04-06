@@ -107,7 +107,7 @@
 
 <script>
 (function() {
-    const hypotheses = {{ hypotheses_data.get('hypotheses', []) | tojson }};
+    const hypotheses = {{ hypotheses_data.get('hypotheses', []) | tojson | safe }};
     const canvas = document.getElementById('exp-canvas');
     if (!canvas || !hypotheses.length) return;
     const ctx = canvas.getContext('2d');

@@ -823,7 +823,7 @@ except Exception as e:
                 "--memory", "4g", "--cpus", "2",
                 "python:3.11-slim",
                 "sh", "-c",
-                "pip install -q -r requirements.txt 2>/dev/null; python -m pytest test_benchmark.py -v --tb=short -x 2>&1 || true; cat benchmark_results.json 2>/dev/null || echo '{}'"
+                "pip install -q pytest -r requirements.txt 2>&1; python -m pytest test_benchmark.py -v --tb=short -x 2>&1; cat benchmark_results.json 2>/dev/null || echo '{}'"
             ])
             result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=600)
 
