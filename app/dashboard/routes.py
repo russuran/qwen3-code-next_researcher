@@ -454,6 +454,7 @@ async def rerun_benchmark(
     async def _do_benchmark():
         from core.overnight_pipeline import OvernightPipeline
         from app.deps import build_llm
+        from app.db import session as db_session
         llm = build_llm(settings)
         pipeline = OvernightPipeline(llm=llm, workspace=str(workspace))
 
