@@ -360,6 +360,7 @@ async def run_detail(request: Request, run_id: str, db: AsyncSession = Depends(g
                     "source_file": source_file[:50],
                     "filename": gt_file.parent.name,
                     "fields": gt.get("fields", {}),
+                    "raw_text": gt.get("raw_text", ""),
                     "validated": gt.get("validated", False),
                     "image_url": f"/dashboard/serve-image?path={img_file}" if img_file else None,
                 })
@@ -399,10 +400,14 @@ async def validate_label(request: Request, run_id: str):
         # Update fields from form
         fields = {}
         for key, value in form.items():
-            if key.startswith("field_"):
+            if key.startswith("field_") and key != "field_raw_text":
                 field_name = key[6:]
                 fields[field_name] = value
         gt["fields"] = fields
+        # Update raw_text if provided
+        raw_text = form.get("field_raw_text", "")
+        if raw_text:
+            gt["raw_text"] = raw_text
         gt["validated"] = True
         gt["validated_by"] = "human"
         Path(gt_path).write_text(json.dumps(gt, ensure_ascii=False, indent=2), encoding="utf-8")
