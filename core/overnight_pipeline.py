@@ -416,8 +416,23 @@ Respond with JSON: {{"hypotheses": [{{"id": "H1", "title": "...", "description":
         code_path = impl_dir / "implementation.py"
         code_path.write_text(code, encoding="utf-8")
 
+        # Scan dataset for benchmark prompt
+        data_dir = self._find_real_data()
+        ds_info = "No data. Use /workspace/smoke_test/ as fallback."
+        if data_dir:
+            try:
+                files = list(Path(data_dir).rglob("*.*"))[:20]
+                exts = {}
+                for f in files:
+                    exts[f.suffix] = exts.get(f.suffix, 0) + 1
+                total = len(list(Path(data_dir).rglob("*.*")))
+                sample = [str(f.relative_to(data_dir)) for f in files[:5]]
+                ds_info = f"Total files: {total}\nExtensions: {exts}\nSample paths: {sample}"
+            except Exception:
+                pass
+
         # Generate benchmark script
-        bench_prompt = REAL_BENCHMARK_PROMPT.format(title=hyp.get("title", ""))
+        bench_prompt = REAL_BENCHMARK_PROMPT.format(title=hyp.get("title", ""), data_structure=ds_info)
         bench_code = self._extract_code(await self.llm.generate(bench_prompt, mode=LLMMode.THINKING))
         (impl_dir / "test_benchmark.py").write_text(bench_code, encoding="utf-8")
 
