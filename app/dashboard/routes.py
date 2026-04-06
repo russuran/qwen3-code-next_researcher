@@ -27,6 +27,8 @@ _env = jinja2.Environment(
     loader=jinja2.FileSystemLoader(_TEMPLATE_DIR),
     autoescape=True,
 )
+_env.filters["tojson"] = lambda v: json.dumps(v, default=str, ensure_ascii=False)
+_env.tests["mapping"] = lambda v: isinstance(v, dict)
 
 
 def _render(template_name: str, **ctx) -> HTMLResponse:
