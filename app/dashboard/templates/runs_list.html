@@ -3,103 +3,95 @@
 {% block nav_runs %}class="active"{% endblock %}
 {% block content %}
 
-{# === Research Form === #}
 <div class="card">
-    <h2>New Research</h2>
     <form hx-post="/dashboard/runs" hx-target="#runs-table" hx-swap="innerHTML" hx-indicator="#spinner" hx-encoding="multipart/form-data">
-        <div class="form-row">
-            <input type="text" name="topic" placeholder="Research topic..." required style="flex: 2;">
-            <button class="btn" type="submit">Start</button>
+        {# Row 1: Topic + Start #}
+        <div class="form-row" style="margin-bottom: 0.5rem;">
+            <input type="text" name="topic" placeholder="Research topic..." required style="flex: 1;">
+            <button class="btn" type="submit" id="start-btn">Start</button>
             <span id="spinner" class="htmx-indicator text-dim">Starting...</span>
         </div>
-        <div class="mt-1">
-            <label class="form-label">Detailed description (optional)</label>
-            <textarea name="extra_prompt" rows="2" placeholder="Specific requirements, constraints, focus areas..." style="width: 100%; resize: vertical;"></textarea>
-        </div>
-        <div class="mt-1 flex flex-wrap" style="gap: 1rem; align-items: end;">
-            <div>
-                <label class="form-label">Attach file (context)</label>
-                <input type="file" name="context_file" accept=".txt,.md,.pdf,.json" style="font-size: 0.8rem; color: var(--text-dim);">
+
+        {# Row 2: Description #}
+        <textarea name="extra_prompt" rows="2" placeholder="Details, constraints, focus areas... (optional)" style="width: 100%; resize: vertical; margin-bottom: 0.5rem;"></textarea>
+
+        {# Row 3: Settings row #}
+        <div class="settings-row">
+            <label class="toggle-item">
+                <input type="checkbox" name="overnight" id="overnight-toggle" onchange="document.getElementById('libs-field').style.display=this.checked?'block':'none'">
+                <span>Overnight (implement + benchmark)</span>
+            </label>
+
+            <div class="setting-group">
+                <label class="form-label">Sources</label>
+                <div class="check-group">
+                    <label class="check-item"><input type="checkbox" name="sources" value="github" checked> GitHub</label>
+                    <label class="check-item"><input type="checkbox" name="sources" value="arxiv" checked> arXiv</label>
+                    <label class="check-item"><input type="checkbox" name="sources" value="semantic_scholar"> S2</label>
+                    <label class="check-item"><input type="checkbox" name="sources" value="papers_with_code"> PwC</label>
+                </div>
             </div>
-            <div>
-                <label class="form-label">Dataset (for benchmark)</label>
-                <input type="file" name="dataset_file" accept=".zip,.tar.gz" style="font-size: 0.8rem; color: var(--text-dim);">
-                <div class="text-xs text-muted mt-1">or</div>
-                <input type="text" name="dataset_url" placeholder="URL to dataset..." style="width: 220px; font-size: 0.8rem;">
+
+            <div class="setting-group">
+                <label class="form-label">Depth</label>
+                <input type="number" name="max_results" value="7" min="1" max="30" style="width: 50px;">
             </div>
-            <div>
+
+            <div class="setting-group">
                 <label class="form-label">Iterations</label>
-                <input type="number" name="max_iterations" value="3" min="1" max="10" style="width: 55px;">
-            </div>
-            <div>
-                <label class="form-label">Per source</label>
-                <input type="number" name="max_results" value="7" min="1" max="30" style="width: 55px;">
+                <input type="number" name="max_iterations" value="3" min="1" max="10" style="width: 50px;">
             </div>
         </div>
 
-        <details class="mt-2">
-            <summary style="cursor: pointer; color: var(--text-muted); font-size: 0.8rem;">Pipeline settings</summary>
-            <div class="mt-1 flex flex-wrap" style="gap: 1rem;">
+        {# Row 4: Overnight libs (hidden by default) #}
+        <div id="libs-field" style="display: none; margin-top: 0.5rem;">
+            <label class="form-label">Libraries for implementation</label>
+            <input type="text" name="libraries" value="pytesseract, easyocr, Pillow, opencv-python" style="width: 100%;">
+        </div>
+
+        {# Row 5: Attachments #}
+        <details style="margin-top: 0.5rem;">
+            <summary style="cursor: pointer; color: var(--text-muted); font-size: 0.8rem;">Attachments & pipeline</summary>
+            <div class="mt-1 flex flex-wrap" style="gap: 1rem; align-items: end;">
                 <div>
-                    <label class="form-label">Stages</label>
-                    <div class="check-group">
-                        <label class="check-item"><input type="checkbox" name="stages" value="plan" checked> Plan</label>
-                        <label class="check-item"><input type="checkbox" name="stages" value="search" checked> Search</label>
-                        <label class="check-item"><input type="checkbox" name="stages" value="filter" checked> Filter</label>
-                        <label class="check-item"><input type="checkbox" name="stages" value="deep_fetch" checked> Deep Fetch</label>
-                        <label class="check-item"><input type="checkbox" name="stages" value="analyze" checked> Analyze</label>
-                        <label class="check-item"><input type="checkbox" name="stages" value="iterative" checked> Iterative</label>
-                        <label class="check-item"><input type="checkbox" name="stages" value="hypotheses" checked> Hypotheses</label>
-                        <label class="check-item"><input type="checkbox" name="stages" value="contradictions" checked> Contradictions</label>
-                        <label class="check-item"><input type="checkbox" name="stages" value="synthesize" checked> Synthesize</label>
-                    </div>
+                    <label class="form-label">Context file</label>
+                    <input type="file" name="context_file" accept=".txt,.md,.pdf,.json" style="font-size: 0.78rem; color: var(--text-dim);">
                 </div>
                 <div>
-                    <label class="form-label">Sources</label>
-                    <div class="check-group">
-                        <label class="check-item"><input type="checkbox" name="sources" value="github" checked> GitHub</label>
-                        <label class="check-item"><input type="checkbox" name="sources" value="arxiv" checked> arXiv</label>
-                        <label class="check-item"><input type="checkbox" name="sources" value="semantic_scholar"> Semantic Scholar</label>
-                        <label class="check-item"><input type="checkbox" name="sources" value="papers_with_code"> Papers With Code</label>
-                    </div>
+                    <label class="form-label">Dataset</label>
+                    <input type="file" name="dataset_file" accept=".zip,.tar.gz" style="font-size: 0.78rem; color: var(--text-dim);">
+                </div>
+                <div>
+                    <label class="form-label">Dataset URL</label>
+                    <input type="text" name="dataset_url" placeholder="https://..." style="width: 200px; font-size: 0.8rem;">
+                </div>
+            </div>
+            <div class="mt-1">
+                <label class="form-label">Stages</label>
+                <div class="check-group">
+                    <label class="check-item"><input type="checkbox" name="stages" value="plan" checked> Plan</label>
+                    <label class="check-item"><input type="checkbox" name="stages" value="search" checked> Search</label>
+                    <label class="check-item"><input type="checkbox" name="stages" value="filter" checked> Filter</label>
+                    <label class="check-item"><input type="checkbox" name="stages" value="deep_fetch" checked> Deep Fetch</label>
+                    <label class="check-item"><input type="checkbox" name="stages" value="analyze" checked> Analyze</label>
+                    <label class="check-item"><input type="checkbox" name="stages" value="iterative" checked> Iterative</label>
+                    <label class="check-item"><input type="checkbox" name="stages" value="hypotheses" checked> Hypotheses</label>
+                    <label class="check-item"><input type="checkbox" name="stages" value="contradictions" checked> Contradictions</label>
+                    <label class="check-item"><input type="checkbox" name="stages" value="synthesize" checked> Synthesize</label>
                 </div>
             </div>
         </details>
     </form>
 </div>
 
-{# === Overnight Run === #}
-<div class="card" style="border-color: var(--purple);">
-    <form hx-post="/dashboard/overnight" hx-target="#overnight-status" hx-swap="innerHTML" hx-indicator="#overnight-spinner">
-        <div class="card-header" style="margin-bottom: 0.5rem;">
-            <div>
-                <h2 style="color: #a78bfa; margin-bottom: 0;">Overnight Run</h2>
-                <span class="text-xs text-muted">Research + implement + smoke test + wait for data + benchmark</span>
-            </div>
-            <div class="flex items-center gap-1">
-                <span id="overnight-spinner" class="htmx-indicator text-dim">Launching...</span>
-                <button class="btn btn-purple" type="submit">Launch</button>
-            </div>
-        </div>
-        <div class="flex flex-wrap" style="gap: 0.75rem; align-items: end;">
-            <div style="flex: 2; min-width: 200px;">
-                <label class="form-label">Topic</label>
-                <input type="text" name="topic" placeholder="e.g. Russian document OCR field extraction" required style="width: 100%;">
-            </div>
-            <div style="min-width: 180px;">
-                <label class="form-label">Libraries to use</label>
-                <input type="text" name="libraries" value="pytesseract, easyocr, Pillow, opencv-python" style="width: 100%;">
-            </div>
-            <div>
-                <label class="form-label">Improve iterations</label>
-                <input type="number" name="max_iterations" value="3" min="1" max="10" style="width: 55px;">
-            </div>
-        </div>
-        <div id="overnight-status" class="mt-1"></div>
-    </form>
-</div>
+<style>
+    .settings-row { display: flex; align-items: center; gap: 1.25rem; flex-wrap: wrap; }
+    .setting-group { display: flex; flex-direction: column; gap: 0.15rem; }
+    .toggle-item { display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer; font-size: 0.85rem; color: #a78bfa; padding: 0.3rem 0.6rem; border: 1px solid var(--border); border-radius: 0.375rem; }
+    .toggle-item:hover { border-color: #7c3aed; }
+    .toggle-item input { accent-color: #7c3aed; }
+</style>
 
-{# === Runs Table === #}
 <h2>Runs</h2>
 <div id="runs-table" hx-get="/dashboard/runs/table" hx-trigger="load, every 5s" hx-swap="innerHTML">Loading...</div>
 {% endblock %}

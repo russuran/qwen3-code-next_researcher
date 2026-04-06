@@ -106,50 +106,11 @@ async def runs_table(request: Request, db: AsyncSession = Depends(get_db)):
     return _render("runs_table.html", runs=runs)
 
 
-@router.post("/overnight", response_class=HTMLResponse)
-async def launch_overnight_form(
-    request: Request,
-    topic: str = Form(...),
-    libraries: str = Form("pytesseract, easyocr, Pillow, opencv-python"),
-    max_iterations: int = Form(3),
-    db: AsyncSession = Depends(get_db),
-    settings: Settings = Depends(get_settings),
-):
-    import httpx as httpx_client
-    try:
-        async with httpx_client.AsyncClient() as client:
-            resp = await client.post(
-                "http://localhost:8000/overnight",
-                json={
-                    "topic": topic, "libraries": libraries,
-                    "max_iterations": max_iterations,
-                },
-                timeout=30,
-            )
-            if resp.status_code == 201:
-                data = resp.json()
-                run_id = data.get("run_id", "")
-                return HTMLResponse(
-                    f'<div style="padding: 0.5rem; background: #2e1065; border: 1px solid #7c3aed; border-radius: 0.375rem;">'
-                    f'Overnight pipeline launched. '
-                    f'<a href="/dashboard/runs/{run_id}" style="color: #a78bfa;">Track progress</a>'
-                    f'</div>'
-                )
-            else:
-                return HTMLResponse(
-                    f'<div style="padding: 0.5rem; background: #450a0a; border: 1px solid #991b1b; border-radius: 0.375rem;">'
-                    f'Error: {resp.text[:200]}</div>'
-                )
-    except Exception as e:
-        return HTMLResponse(f'<div style="color: #ef4444;">Error: {e}</div>')
-
-
 @router.post("/runs", response_class=HTMLResponse)
 async def create_run_form(
     request: Request,
     topic: str = Form(...),
     extra_prompt: str = Form(""),
-    mode: str = Form("greenfield"),
     max_results: int = Form(7),
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
@@ -161,6 +122,8 @@ async def create_run_form(
         "iterative", "hypotheses", "contradictions", "synthesize",
     ]
     max_iterations = int(form_data.get("max_iterations", 3))
+    is_overnight = "overnight" in form_data
+    libraries = form_data.get("libraries", "pytesseract, easyocr, Pillow, opencv-python")
 
     # Handle context file
     context_text = ""
@@ -174,40 +137,72 @@ async def create_run_form(
     if extra_prompt.strip():
         enriched_topic += f"\n\nAdditional instructions: {extra_prompt.strip()}"
     if context_text:
-        enriched_topic += f"\n\nContext from attached file ({context_file.filename}):\n{context_text[:5000]}"
+        enriched_topic += f"\n\nContext from file ({context_file.filename}):\n{context_text[:5000]}"
 
+    # Handle dataset upload
+    dataset_file = form_data.get("dataset_file")
+    dataset_url = form_data.get("dataset_url", "").strip()
+
+    if is_overnight:
+        # Launch overnight pipeline
+        import httpx as httpx_client
+        try:
+            async with httpx_client.AsyncClient() as client:
+                resp = await client.post(
+                    "http://localhost:8000/overnight",
+                    json={"topic": enriched_topic, "libraries": libraries, "max_iterations": max_iterations, "sources": list(sources)},
+                    timeout=30,
+                )
+                if resp.status_code == 201:
+                    data = resp.json()
+                    run_id = data.get("run_id", "")
+
+                    # Upload dataset to overnight workspace if provided
+                    if dataset_file and hasattr(dataset_file, 'filename') and dataset_file.filename:
+                        dest = Path(f"workspace/overnight-{run_id[:8]}") / "user_data"
+                        dest.mkdir(parents=True, exist_ok=True)
+                        file_content = await dataset_file.read()
+                        if dataset_file.filename.endswith(".zip"):
+                            import zipfile as zf_mod
+                            import io as io_mod
+                            with zf_mod.ZipFile(io_mod.BytesIO(file_content)) as z:
+                                z.extractall(dest)
+                        else:
+                            (dest / dataset_file.filename).write_bytes(file_content)
+
+                    result = await db.execute(select(Run).order_by(Run.created_at.desc()).limit(50))
+                    runs = list(result.scalars().all())
+                    return _render("runs_table.html", runs=runs)
+        except Exception:
+            pass
+
+    # Regular research run
     body = RunCreate(
         topic=enriched_topic,
-        mode=mode,
         sources=list(sources),
         max_results_per_source=max_results,
     )
-
     run = await run_service.create_run(db, body)
 
-    # Handle dataset file/URL
-    dataset_file = form_data.get("dataset_file")
-    dataset_url = form_data.get("dataset_url", "")
     if dataset_file and hasattr(dataset_file, 'filename') and dataset_file.filename:
-        dest = Path(run.output_dir or f"output/run-{str(run.id)[:8]}") / "user_data"
+        dest = Path(f"output/run-{str(run.id)[:8]}") / "user_data"
         dest.mkdir(parents=True, exist_ok=True)
-        content = await dataset_file.read()
-        fname = dataset_file.filename
-        if fname.endswith(".zip"):
+        file_content = await dataset_file.read()
+        if dataset_file.filename.endswith(".zip"):
             import zipfile as zf_mod
             import io as io_mod
-            with zf_mod.ZipFile(io_mod.BytesIO(content)) as z:
+            with zf_mod.ZipFile(io_mod.BytesIO(file_content)) as z:
                 z.extractall(dest)
         else:
-            (dest / fname).write_bytes(content)
+            (dest / dataset_file.filename).write_bytes(file_content)
 
     run.config = {
         **(run.config or {}),
         "stages": list(stages),
-        "extra_prompt": extra_prompt,
+        "extra_prompt": extra_prompt.strip(),
         "original_topic": topic,
         "max_iterations": max_iterations,
-        "dataset_url": dataset_url.strip(),
+        "dataset_url": dataset_url,
     }
     await db.commit()
 
