@@ -259,10 +259,18 @@ class OvernightPipeline:
             self._log("implementations_done",
                        f"{len(working)} working, {len(failed)} failed smoke test out of {len(implementations)}")
 
-            # Phase 4: Check for real data and benchmark if available
+            # Phase 4: Check for real data, auto-label if needed, then benchmark
             data_dir = self._find_real_data()
 
             if data_dir:
+                # Auto-label: generate ground_truth.json where missing
+                has_gt = any(Path(data_dir).rglob("ground_truth.json"))
+                if not has_gt:
+                    self._log("phase", "Phase 3.9: Auto-labeling dataset (no ground truth found)")
+                    if on_progress:
+                        await on_progress("labeling", "Auto-labeling dataset with cross-validation OCR...")
+                    await self._auto_label_dataset(data_dir)
+
                 self._log("phase", "Phase 4: Benchmarking on real data")
                 if on_progress:
                     await on_progress("benchmark", f"Running benchmarks on {data_dir}")
@@ -604,6 +612,143 @@ Respond with TWO code blocks:
             return str(real_data)
 
         return None
+
+    # ------------------------------------------------------------------
+    # Auto-labeling
+    # ------------------------------------------------------------------
+
+    async def _auto_label_dataset(self, data_dir: str) -> None:
+        """Auto-generate ground_truth.json for images using cross-validation OCR in Docker."""
+        import subprocess
+
+        label_script = """\
+import os, json, sys
+from pathlib import Path
+
+data_path = Path("/data")
+results = {}
+labeled = 0
+
+# Try to import OCR engines
+engines = []
+try:
+    import pytesseract
+    engines.append(("tesseract", lambda img: pytesseract.image_to_string(img, lang="rus+eng")))
+except ImportError:
+    pass
+
+try:
+    import easyocr
+    reader = easyocr.Reader(["en", "ru"], gpu=False, verbose=False)
+    engines.append(("easyocr", lambda img: " ".join([r[1] for r in reader.readtext(str(img))])))
+except ImportError:
+    pass
+
+if not engines:
+    print("No OCR engines available")
+    sys.exit(0)
+
+# Scan for images
+image_exts = {".jpg", ".jpeg", ".png", ".bmp", ".tiff"}
+for img_path in sorted(data_path.rglob("*")):
+    if img_path.suffix.lower() not in image_exts:
+        continue
+    if img_path.stat().st_size < 1000:
+        continue
+
+    gt_path = img_path.parent / "ground_truth.json"
+    if gt_path.exists():
+        continue
+
+    # Run all available engines
+    ocr_results = {}
+    for name, engine_fn in engines:
+        try:
+            if name == "tesseract":
+                from PIL import Image
+                img = Image.open(str(img_path))
+                text = engine_fn(img)
+            else:
+                text = engine_fn(img_path)
+            ocr_results[name] = text.strip()
+        except Exception as e:
+            ocr_results[name] = f"ERROR: {e}"
+
+    # Cross-validate: use consensus or first available
+    texts = [v for v in ocr_results.values() if not v.startswith("ERROR")]
+    if not texts:
+        continue
+
+    # Simple consensus: take the longest non-error result (usually more complete)
+    best_text = max(texts, key=len)
+
+    # Parse fields (best effort)
+    lines = best_text.split("\\n")
+    gt = {
+        "raw_text": best_text,
+        "ocr_engines": list(ocr_results.keys()),
+        "fields": {},
+        "source_file": str(img_path.relative_to(data_path)),
+    }
+
+    # Try to extract common fields
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        lower = line.lower()
+        if any(k in lower for k in ["фамилия", "имя", "отчество", "name", "фио"]):
+            gt["fields"]["name"] = line
+        elif any(k in lower for k in ["серия", "series", "номер", "number", "паспорт"]):
+            gt["fields"]["document_number"] = line
+        elif any(k in lower for k in ["дата", "date", "рожд", "birth"]):
+            gt["fields"]["date"] = line
+        elif any(k in lower for k in ["пол", "sex", "gender"]):
+            gt["fields"]["gender"] = line
+
+    gt_path.write_text(json.dumps(gt, ensure_ascii=False, indent=2))
+    labeled += 1
+    if labeled % 10 == 0:
+        print(f"Labeled {labeled} images...")
+
+print(f"Done: {labeled} images labeled with {len(engines)} engine(s)")
+"""
+
+        # Write labeling script
+        label_path = self.workspace / "auto_label.py"
+        label_path.write_text(label_script)
+
+        # Also write requirements
+        req_path = self.workspace / "label_requirements.txt"
+        req_path.write_text("pytesseract\neasyocr\nPillow\nopencv-python-headless\n")
+
+        # Run in Docker with data mounted
+        try:
+            docker_cmd = [
+                "docker", "run", "--rm",
+                "-v", f"{Path(data_dir).resolve()}:/data",
+                "-v", f"{self.workspace.resolve()}:/scripts",
+                "-w", "/scripts",
+                "--memory", "4g", "--cpus", "2",
+                "python:3.11-slim",
+                "sh", "-c",
+                "apt-get update -qq && apt-get install -y -qq tesseract-ocr tesseract-ocr-rus libgl1-mesa-glx libglib2.0-0 > /dev/null 2>&1; "
+                "pip install -q -r label_requirements.txt 2>&1; python auto_label.py"
+            ]
+            result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=600)
+            output = result.stdout.strip()[-200:]
+            self._log("auto_label", f"Labeling: {output}")
+
+            # Count generated ground truths
+            gt_count = len(list(Path(data_dir).rglob("ground_truth.json")))
+            self._log("auto_label_done", f"Generated {gt_count} ground_truth.json files")
+
+        except subprocess.TimeoutExpired:
+            self._log("auto_label", "Labeling timed out (600s)")
+        except FileNotFoundError:
+            self._log("auto_label", "Docker not available, skipping auto-labeling")
+        except Exception as e:
+            self._log("auto_label", f"Labeling error: {e}")
 
     # ------------------------------------------------------------------
     # Dataset download
