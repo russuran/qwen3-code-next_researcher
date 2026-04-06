@@ -411,6 +411,75 @@ async def validate_label(request: Request, run_id: str):
         return HTMLResponse(f'<span class="text-xs" style="color: var(--red-text);">{e}</span>')
 
 
+@router.post("/runs/{run_id}/rerun-benchmark", response_class=HTMLResponse)
+async def rerun_benchmark(
+    request: Request, run_id: str,
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+):
+    """Re-run benchmark on validated labels."""
+    import asyncio as aio
+
+    try:
+        uid = UUID(run_id)
+    except ValueError:
+        return HTMLResponse("Invalid ID", status_code=400)
+
+    run = await db.get(Run, uid)
+    if not run:
+        return HTMLResponse("Run not found", status_code=404)
+
+    # Find workspace with implementations
+    run_short = str(run.id)[:8]
+    workspace = None
+    for ws in Path("workspace").glob(f"*{run_short}*"):
+        if ws.is_dir():
+            workspace = ws
+            break
+
+    if not workspace:
+        return HTMLResponse('<span style="color: var(--red-text);">No workspace found for this run</span>')
+
+    # Find implementations
+    impl_dirs = [d for d in workspace.iterdir() if d.is_dir() and (d / "implementation.py").exists()]
+    if not impl_dirs:
+        return HTMLResponse('<span style="color: var(--red-text);">No implementations found</span>')
+
+    # Launch benchmark in background
+    async def _do_benchmark():
+        from core.overnight_pipeline import OvernightPipeline
+        from app.deps import build_llm
+        llm = build_llm(settings)
+        pipeline = OvernightPipeline(llm=llm, workspace=str(workspace))
+
+        results = []
+        for impl_dir in impl_dirs:
+            metrics = await pipeline._run_benchmark(impl_dir)
+            results.append({"dir": impl_dir.name, "metrics": metrics})
+
+            # Log event
+            if db_session.async_session_factory:
+                async with db_session.async_session_factory() as session:
+                    event = Event(
+                        run_id=uid, phase="benchmark", action="rerun_benchmark",
+                        result_summary=f"{impl_dir.name}: {json.dumps(metrics)[:100]}",
+                    )
+                    session.add(event)
+                    await session.commit()
+
+        # Save results
+        (workspace / "rerun_benchmark_results.json").write_text(
+            json.dumps(results, indent=2, default=str), encoding="utf-8"
+        )
+
+    aio.create_task(_do_benchmark())
+    return HTMLResponse(
+        f'<div style="padding: 0.4rem; background: #1e3a5f; border: 1px solid var(--accent); border-radius: 0.25rem;">'
+        f'Re-running benchmark on {len(impl_dirs)} implementations with validated labels. Check events for progress.'
+        f'</div>'
+    )
+
+
 @router.get("/runs/{run_id}/events-partial", response_class=HTMLResponse)
 async def events_partial(request: Request, run_id: str, db: AsyncSession = Depends(get_db)):
     try:
