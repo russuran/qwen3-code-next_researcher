@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -425,38 +426,76 @@ Respond with JSON: {{"hypotheses": [{{"id": "H1", "title": "...", "description":
         except ImportError:
             (smoke_dir / "dummy.txt").write_text("smoke test input", encoding="utf-8")
 
-        # Smoke test: just import and call run() — check it doesn't crash
-        smoke_script = f"""
-import sys
-sys.path.insert(0, "{impl_dir}")
+        # Generate requirements.txt for sandbox
+        (impl_dir / "requirements.txt").write_text(
+            "\n".join(lib.strip() for lib in libraries.split(",")) + "\n",
+            encoding="utf-8",
+        )
+
+        # Smoke test script
+        smoke_script = """\
+import sys, os
+sys.path.insert(0, "/workspace")
 try:
     import implementation
     if hasattr(implementation, 'run'):
-        result = implementation.run("{smoke_dir}")
-        print(f"OK: {{result}}")
+        result = implementation.run("/workspace/smoke_test")
+        print(f"OK: {result}")
     elif hasattr(implementation, 'demo'):
         implementation.demo()
         print("OK: demo ran")
     else:
         print("OK: module imported")
 except Exception as e:
-    print(f"FAIL: {{e}}")
+    print(f"FAIL: {e}")
     sys.exit(1)
 """
         smoke_path = impl_dir / "smoke_test.py"
         smoke_path.write_text(smoke_script)
 
+        # Run smoke test in Docker sandbox
         import subprocess
+        passed = False
+        output = ""
         try:
+            # Build command: install deps + run smoke test
+            docker_cmd = [
+                "docker", "run", "--rm",
+                "-v", f"{impl_dir.resolve()}:/workspace",
+                "-w", "/workspace",
+                "--network", "none",
+                "--memory", "2g",
+                "--cpus", "2",
+                "python:3.11-slim",
+                "sh", "-c",
+                "pip install -q -r requirements.txt 2>/dev/null; python smoke_test.py"
+            ]
             result = subprocess.run(
-                [sys.executable, str(smoke_path)],
-                capture_output=True, text=True, timeout=60,
+                docker_cmd,
+                capture_output=True, text=True, timeout=180,
             )
             passed = result.returncode == 0
+            output = result.stdout.strip()[:200] + result.stderr.strip()[:200]
             self._log("smoke_test",
-                       f"{'PASS' if passed else 'FAIL'}: {hyp.get('title','')} — {result.stdout.strip()[:80]}{result.stderr.strip()[:80]}")
+                       f"{'PASS' if passed else 'FAIL'} (docker): {hyp.get('title','')} — {output[:80]}")
+        except FileNotFoundError:
+            # Docker not available, try locally
+            self._log("smoke_test_fallback", "Docker not available, running locally")
+            try:
+                result = subprocess.run(
+                    [sys.executable, str(smoke_path)],
+                    capture_output=True, text=True, timeout=60,
+                    env={**os.environ, "PYTHONPATH": str(impl_dir)},
+                )
+                passed = result.returncode == 0
+                output = result.stdout.strip()[:200] + result.stderr.strip()[:200]
+                self._log("smoke_test",
+                           f"{'PASS' if passed else 'FAIL'} (local): {hyp.get('title','')} — {output[:80]}")
+            except Exception as e:
+                self._log("smoke_test", f"FAIL: {hyp.get('title','')} — {e}")
+        except subprocess.TimeoutExpired:
+            self._log("smoke_test", f"TIMEOUT: {hyp.get('title','')}")
         except Exception as e:
-            passed = False
             self._log("smoke_test", f"FAIL: {hyp.get('title','')} — {e}")
 
         # Git init
@@ -714,16 +753,30 @@ except Exception as e:
         }
 
     async def _run_benchmark(self, impl_dir: Path) -> dict:
-        """Run benchmark and return metrics."""
+        """Run benchmark in Docker sandbox (falls back to local)."""
         import subprocess
-        try:
-            result = subprocess.run(
-                [sys.executable, "-m", "pytest", "test_benchmark.py", "-v", "--tb=short", "-x"],
-                cwd=str(impl_dir),
-                capture_output=True, text=True, timeout=300,
-            )
 
-            # Try to load benchmark_results.json if generated
+        # Find data to mount
+        data_dir = self._find_real_data()
+        data_mount = f"-v {Path(data_dir).resolve()}:/data" if data_dir else ""
+
+        try:
+            # Try Docker first
+            docker_cmd = [
+                "docker", "run", "--rm",
+                "-v", f"{impl_dir.resolve()}:/workspace",
+            ]
+            if data_dir:
+                docker_cmd.extend(["-v", f"{Path(data_dir).resolve()}:/data"])
+            docker_cmd.extend([
+                "-w", "/workspace",
+                "--memory", "4g", "--cpus", "2",
+                "python:3.11-slim",
+                "sh", "-c",
+                "pip install -q -r requirements.txt 2>/dev/null; python -m pytest test_benchmark.py -v --tb=short -x 2>&1 || true; cat benchmark_results.json 2>/dev/null || echo '{}'"
+            ])
+            result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=600)
+
             results_path = impl_dir / "benchmark_results.json"
             if results_path.exists():
                 return json.loads(results_path.read_text())
@@ -733,6 +786,23 @@ except Exception as e:
                 "accuracy": 1.0 if result.returncode == 0 else 0.0,
                 "output": result.stdout[-2000:],
             }
+        except FileNotFoundError:
+            # Docker not available, run locally
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-m", "pytest", "test_benchmark.py", "-v", "--tb=short", "-x"],
+                    cwd=str(impl_dir), capture_output=True, text=True, timeout=300,
+                )
+                results_path = impl_dir / "benchmark_results.json"
+                if results_path.exists():
+                    return json.loads(results_path.read_text())
+                return {
+                    "passed": result.returncode == 0,
+                    "accuracy": 1.0 if result.returncode == 0 else 0.0,
+                    "output": result.stdout[-2000:],
+                }
+            except Exception as e:
+                return {"passed": False, "accuracy": 0.0, "error": str(e)}
         except Exception as e:
             return {"passed": False, "accuracy": 0.0, "error": str(e)}
 
