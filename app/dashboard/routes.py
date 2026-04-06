@@ -326,12 +326,89 @@ async def run_detail(request: Request, run_id: str, db: AsyncSession = Depends(g
     if not data_available:
         data_available = Path("uploads/datasets").exists() and any(Path("uploads/datasets").rglob("*.*"))
 
+    # Load auto-generated labels for validation
+    labels = []
+    data_dir = None
+    if data_available:
+        for check_dir in [Path("uploads/datasets")]:
+            if check_dir.exists():
+                for d in sorted(check_dir.iterdir(), reverse=True):
+                    if d.is_dir() and any(d.rglob("*.*")):
+                        data_dir = d
+                        break
+                if data_dir:
+                    break
+    if data_dir:
+        for gt_file in sorted(data_dir.rglob("ground_truth.json"))[:30]:
+            try:
+                gt = json.loads(gt_file.read_text(encoding="utf-8"))
+                source_file = gt.get("source_file", str(gt_file.relative_to(data_dir)))
+                # Find image next to ground_truth
+                img_file = None
+                for ext in [".jpg", ".jpeg", ".png"]:
+                    candidate = gt_file.parent / (gt_file.stem.replace("ground_truth", "") + ext).lstrip(".")
+                    if not candidate.exists():
+                        for img in gt_file.parent.glob(f"*{ext}"):
+                            candidate = img
+                            break
+                    if candidate.exists():
+                        img_file = candidate
+                        break
+
+                labels.append({
+                    "gt_path": str(gt_file),
+                    "source_file": source_file[:50],
+                    "filename": gt_file.parent.name,
+                    "fields": gt.get("fields", {}),
+                    "validated": gt.get("validated", False),
+                    "image_url": f"/dashboard/serve-image?path={img_file}" if img_file else None,
+                })
+            except Exception:
+                continue
+
     return _render(
         "run_detail.html",
         run=run, events=events, metrics=metrics,
         artifacts=artifacts, phase_events=phase_events,
         hypotheses_data=hypotheses_data, data_available=data_available,
+        labels=labels,
     )
+
+
+@router.get("/serve-image")
+async def serve_image(path: str):
+    """Serve dataset images for label validation."""
+    from fastapi.responses import FileResponse as FR
+    p = Path(path)
+    if not p.exists() or not p.is_file():
+        return HTMLResponse("Not found", status_code=404)
+    content_type = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}.get(p.suffix.lower().lstrip("."), "application/octet-stream")
+    return FR(str(p), media_type=content_type)
+
+
+@router.post("/runs/{run_id}/validate-label", response_class=HTMLResponse)
+async def validate_label(request: Request, run_id: str):
+    """Save validated/corrected label."""
+    form = await request.form()
+    gt_path = form.get("label_path", "")
+    if not gt_path or not Path(gt_path).exists():
+        return HTMLResponse('<span class="text-xs" style="color: var(--red-text);">File not found</span>')
+
+    try:
+        gt = json.loads(Path(gt_path).read_text(encoding="utf-8"))
+        # Update fields from form
+        fields = {}
+        for key, value in form.items():
+            if key.startswith("field_"):
+                field_name = key[6:]
+                fields[field_name] = value
+        gt["fields"] = fields
+        gt["validated"] = True
+        gt["validated_by"] = "human"
+        Path(gt_path).write_text(json.dumps(gt, ensure_ascii=False, indent=2), encoding="utf-8")
+        return HTMLResponse('<span class="text-xs" style="color: var(--green-text);">Saved</span>')
+    except Exception as e:
+        return HTMLResponse(f'<span class="text-xs" style="color: var(--red-text);">{e}</span>')
 
 
 @router.get("/runs/{run_id}/events-partial", response_class=HTMLResponse)
