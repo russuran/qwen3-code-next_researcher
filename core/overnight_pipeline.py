@@ -502,7 +502,7 @@ except Exception as e:
                     "apt-get update -qq && apt-get install -y -qq tesseract-ocr libgl1-mesa-glx libglib2.0-0 > /dev/null 2>&1; "
                     "pip install -q -r requirements.txt 2>&1; python smoke_test.py"
                 ]
-                result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=300)
+                result = await asyncio.to_thread(subprocess.run, docker_cmd, capture_output=True, text=True, timeout=300,)
                 output = result.stdout.strip()[-500:] + "\n" + result.stderr.strip()[-500:]
                 passed = result.returncode == 0
 
@@ -735,11 +735,13 @@ print(f"Done: {labeled} images labeled with {len(engines)} engine(s)")
                 "apt-get update -qq && apt-get install -y -qq tesseract-ocr tesseract-ocr-rus libgl1-mesa-glx libglib2.0-0 > /dev/null 2>&1; "
                 "pip install -q -r label_requirements.txt 2>&1; python auto_label.py"
             ]
-            result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=600)
+            result = await asyncio.to_thread(
+                subprocess.run, docker_cmd,
+                capture_output=True, text=True, timeout=600,
+            )
             output = result.stdout.strip()[-200:]
             self._log("auto_label", f"Labeling: {output}")
 
-            # Count generated ground truths
             gt_count = len(list(Path(data_dir).rglob("ground_truth.json")))
             self._log("auto_label_done", f"Generated {gt_count} ground_truth.json files")
 
@@ -1009,7 +1011,7 @@ except Exception as e:
                 "sh", "-c",
                 "pip install -q pytest -r requirements.txt 2>&1; python -m pytest test_benchmark.py -v --tb=short -x 2>&1; cat benchmark_results.json 2>/dev/null || echo '{}'"
             ])
-            result = subprocess.run(docker_cmd, capture_output=True, text=True, timeout=600)
+            result = await asyncio.to_thread(subprocess.run, docker_cmd, capture_output=True, text=True, timeout=600,)
 
             results_path = impl_dir / "benchmark_results.json"
             if results_path.exists():
