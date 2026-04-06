@@ -52,18 +52,18 @@
         {# Row 5: Attachments #}
         <details style="margin-top: 0.5rem;">
             <summary style="cursor: pointer; color: var(--text-muted); font-size: 0.8rem;">Attachments & pipeline</summary>
-            <div class="mt-1 flex flex-wrap" style="gap: 1rem; align-items: end;">
-                <div>
+            <div class="settings-row mt-1">
+                <div class="setting-group">
                     <label class="form-label">Context file</label>
-                    <input type="file" name="context_file" accept=".txt,.md,.pdf,.json" style="font-size: 0.78rem; color: var(--text-dim);">
+                    <input type="file" name="context_file" accept=".txt,.md,.pdf,.json" class="file-input">
                 </div>
-                <div>
+                <div class="setting-group">
                     <label class="form-label">Dataset</label>
-                    <input type="file" name="dataset_file" accept=".zip,.tar.gz" style="font-size: 0.78rem; color: var(--text-dim);">
+                    <input type="file" name="dataset_file" accept=".zip,.tar.gz" class="file-input">
                 </div>
-                <div>
+                <div class="setting-group" style="flex: 1;">
                     <label class="form-label">Dataset URL</label>
-                    <input type="text" name="dataset_url" placeholder="https://..." style="width: 200px; font-size: 0.8rem;">
+                    <input type="text" name="dataset_url" placeholder="https://..." style="height: 30px; width: 100%;">
                 </div>
             </div>
             <div class="mt-1">
@@ -97,6 +97,7 @@
     .toggle-item input { accent-color: #7c3aed; }
     .settings-row .check-item { height: 30px; }
     .settings-row input[type="number"] { height: 30px; padding: 0 0.4rem; }
+    .file-input { font-size: 0.75rem; color: var(--text-dim); height: 30px; }
 </style>
 
 <h2>Runs</h2>
