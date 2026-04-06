@@ -35,40 +35,34 @@
 {% endif %}
 
 {# === Pipeline Nodes === #}
+{% if phase_events %}
 <div class="card">
     <h2>Pipeline</h2>
+    {% set phase_colors = {
+        'plan': '#a78bfa', 'search': '#38bdf8', 'filter': '#06b6d4', 'deep_fetch': '#14b8a6',
+        'analyze': '#fb923c', 'iterative': '#f59e0b', 'hypotheses': '#ec4899',
+        'contradictions': '#ef4444', 'synthesize': '#22c55e',
+        'research': '#a78bfa', 'data': '#38bdf8', 'implement': '#fb923c',
+        'benchmark': '#f59e0b', 'improve': '#ec4899', 'waiting': '#64748b'
+    } %}
     <div class="pipeline-graph">
-        {% set stage_info = {
-            'plan': {'label': 'Plan', 'color': '#a78bfa'},
-            'search': {'label': 'Search', 'color': '#38bdf8'},
-            'filter': {'label': 'Filter', 'color': '#06b6d4'},
-            'deep_fetch': {'label': 'Deep Fetch', 'color': '#14b8a6'},
-            'analyze': {'label': 'Analyze', 'color': '#fb923c'},
-            'iterative': {'label': 'Iterate', 'color': '#f59e0b'},
-            'hypotheses': {'label': 'Hypotheses', 'color': '#ec4899'},
-            'contradictions': {'label': 'Contradictions', 'color': '#ef4444'},
-            'synthesize': {'label': 'Synthesize', 'color': '#22c55e'}
-        } %}
-        {% for stage_key, info in stage_info.items() %}
-        {% set count = phase_events.get(stage_key, phase_events.get(stage_key[:4], []))|length if phase_events else 0 %}
-        {% set is_active = count > 0 %}
-        <div class="pipeline-node {% if is_active %}active{% endif %}"
-             style="--node-color: {{ info.color }};"
-             {% if is_active %}
-             hx-get="/dashboard/runs/{{ run.id }}/phase-log/{{ stage_key[:4] if stage_key in ('plan','search','analyze','synthesize') else stage_key[:5] }}"
-             hx-target="#node-logs" hx-swap="innerHTML"
-             {% endif %}>
-            <div class="node-dot" style="background: {{ info.color if is_active else 'var(--border)' }};"></div>
-            <div class="node-label">{{ info.label }}</div>
-            {% if count > 0 %}<div class="node-count">{{ count }}</div>{% endif %}
+        {% for phase_key, phase_evts in phase_events.items() %}
+        <div class="pipeline-node active"
+             style="--node-color: {{ phase_colors.get(phase_key, '#94a3b8') }};"
+             hx-get="/dashboard/runs/{{ run.id }}/phase-log/{{ phase_key }}"
+             hx-target="#node-logs" hx-swap="innerHTML">
+            <div class="node-dot" style="background: {{ phase_colors.get(phase_key, '#94a3b8') }};"></div>
+            <div class="node-label">{{ phase_key | capitalize }}</div>
+            <div class="node-count">{{ phase_evts | length }}</div>
         </div>
         {% if not loop.last %}<div class="pipeline-edge"></div>{% endif %}
         {% endfor %}
     </div>
-    <div id="node-logs" class="events-list mt-2" style="max-height: 300px; min-height: 50px; border: 1px solid var(--border); border-radius: 0.375rem; padding: 0.5rem;">
+    <div id="node-logs" class="events-list mt-2" style="max-height: 350px; min-height: 50px; border: 1px solid var(--border); border-radius: 0.375rem; padding: 0.5rem;">
         <span class="text-dim text-sm">Click a node to view its logs</span>
     </div>
 </div>
+{% endif %}
 
 {# === Experiment Graph (Hypotheses) === #}
 {% if hypotheses_data %}

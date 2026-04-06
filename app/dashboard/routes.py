@@ -280,21 +280,49 @@ async def run_detail(request: Request, run_id: str, db: AsyncSession = Depends(g
     for e in events:
         phase_events.setdefault(e.phase, []).append(e)
 
-    # Load hypotheses data
+    # Load hypotheses data — check multiple locations
     hypotheses_data = None
+    search_paths = []
     if run.output_dir:
-        hyp_path = Path(run.output_dir) / "04_hypotheses.json"
+        search_paths.append(Path(run.output_dir) / "04_hypotheses.json")
+    # Also check workspace for overnight runs
+    run_id_short = str(run.id)[:8]
+    for ws in Path("workspace").glob(f"*{run_id_short}*"):
+        search_paths.append(ws / "overnight_results.json")
+        for sub in ws.glob("research/*/04_hypotheses.json"):
+            search_paths.append(sub)
+
+    for hyp_path in search_paths:
         if hyp_path.exists():
             try:
-                hypotheses_data = json.loads(hyp_path.read_text(encoding="utf-8"))
+                data = json.loads(hyp_path.read_text(encoding="utf-8"))
+                # overnight_results has hypotheses inside implementations
+                if "implementations" in data:
+                    impls = data.get("implementations", [])
+                    hypotheses_data = {
+                        "hypotheses": [
+                            {**impl.get("hypothesis", {}),
+                             "status": "validated" if impl.get("smoke_test_passed") else "rejected",
+                             "benchmark": impl.get("benchmark_metrics", {})}
+                            for impl in impls
+                        ],
+                        "consensus": data.get("research", {}).get("consensus", []),
+                        "gaps": data.get("research", {}).get("gaps", []),
+                    }
+                    break
+                elif "hypotheses" in data:
+                    hypotheses_data = data
+                    break
             except Exception:
-                pass
+                continue
 
     # Check if data is available for benchmark
     data_available = False
     if run.output_dir:
         user_data = Path(run.output_dir) / "user_data"
         data_available = user_data.exists() and any(user_data.rglob("*.*"))
+    if not data_available:
+        data_available = Path("uploads/datasets").exists() and any(Path("uploads/datasets").rglob("*.*"))
 
     return _render(
         "run_detail.html",
