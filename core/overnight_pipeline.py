@@ -167,8 +167,8 @@ The script must:
 Output ONLY Python code in ```python ... ```
 """
 
-# Small Russian BERT for real hypothesis validation (83 MB, fast on CPU, works with AutoModel API)
-VALIDATION_MODEL = "cointegrated/rubert-tiny2"
+# MLX Qwen2.5-7B-Instruct 4-bit for real hypothesis validation on Apple Silicon M-series
+VALIDATION_MODEL = "mlx-community/Qwen2.5-7B-Instruct-4bit"
 
 REPO_HYPOTHESIS_PROMPT = """\
 You are a senior ML engineer analyzing an existing codebase for the following task:
@@ -204,7 +204,8 @@ Return ONLY valid JSON, no prose:
 """
 
 REPO_WRAPPER_PROMPT = """\
-You are a Python engineer. Wrap an ML training file into a standard pipeline interface.
+You are a Python engineer. Wrap an ML training hypothesis into a standard pipeline interface.
+The target machine is Apple Silicon M4 Pro with 24 GB unified memory. Use MLX for training.
 
 Hypothesis: {title}
 Change applied: {change_description}
@@ -217,24 +218,18 @@ Patched file content:
 
 Write `implementation.py` with these exact functions:
 1. `run(input_path: str, smoke: bool = False, num_samples: int = 200) -> dict`
-   - smoke=True: use the tiny in-memory model below (NO downloads)
-   - smoke=False: call the training logic from the patched file above using
-     `os.environ.get("MODEL_NAME", "cointegrated/rubert-tiny2")` as the model
-   - Returns: dict with at least {{"status": "success", "accuracy": ..., "f1": ...}}
+   - smoke=True: run mlx_lm.lora with --iters 3 --num-layers 1 (fast, no large download)
+   - smoke=False: run mlx_lm.lora with --iters 50 --num-layers 4 using
+     model = os.environ.get("MODEL_NAME", "mlx-community/Qwen2.5-7B-Instruct-4bit")
+   - Generates synthetic Russian legal classification data if no real data at input_path
+   - Returns: dict with {{"status": "success"|"error", "val_loss": float, "tokens_per_sec": float, "accuracy": float}}
 2. `benchmark(data_dir: str) -> dict` that calls `run(data_dir, smoke=False)`
 
-MANDATORY smoke mode helper (copy exactly):
-```python
-def _tiny_model_tok():
-    from transformers import AutoConfig, AutoModelForSequenceClassification, PreTrainedTokenizerFast
-    from tokenizers import Tokenizer, models as tk_models, pre_tokenizers as tk_pre
-    tok = Tokenizer(tk_models.BPE()); tok.pre_tokenizer = tk_pre.Whitespace()
-    tokenizer = PreTrainedTokenizerFast(tokenizer_object=tok, pad_token="[PAD]", unk_token="[UNK]")
-    cfg = AutoConfig.for_model("bert", vocab_size=100, hidden_size=32, num_hidden_layers=1,
-                               num_attention_heads=2, intermediate_size=64, max_position_embeddings=128,
-                               num_labels=7)
-    return AutoModelForSequenceClassification.from_config(cfg), tokenizer
-```
+Use subprocess to call: sys.executable, "-m", "mlx_lm.lora", "--model", model, "--train",
+"--data", data_dir, "--num-layers", num_layers, "--iters", iters, ...
+
+Parse val_loss from output with: re.findall(r"[Vv]al loss[:\\s]+([0-9]+\\.[0-9]+)", output)
+Compute accuracy proxy: math.exp(-val_loss)
 
 Output ONLY Python code in ```python ... ```
 """
@@ -405,24 +400,28 @@ class OvernightPipeline:
                 f1 = metrics.get("f1", metrics.get("eval_f1", "?"))
                 self._log("benchmark", f"{impl['hypothesis'].get('title','')}: accuracy={acc} f1={f1}")
 
-            # Rank by real accuracy, iterate improvements on best
-            best = max(working, key=lambda x: x.get("benchmark_metrics", {}).get("accuracy",
-                       x.get("benchmark_metrics", {}).get("eval_accuracy", 0))) if working else {}
+            # Rank: prefer lower val_loss (MLX), fall back to higher accuracy (HuggingFace)
+            def _rank_key(impl):
+                bm = impl.get("benchmark_metrics", {})
+                val_loss = bm.get("val_loss")
+                if val_loss is not None:
+                    return -val_loss  # lower loss = better, negate for max()
+                return bm.get("accuracy", bm.get("eval_accuracy", 0))
+
+            best = max(working, key=_rank_key) if working else {}
             for iteration in range(self.max_iterations):
                 if not best or not best.get("benchmark_metrics"):
                     break
                 if on_progress:
                     await on_progress("improve", f"Improvement iteration {iteration + 1}")
                 improved = await self._improve_implementation(best, data_dir or str(self.workspace), libraries)
-                old_acc = best.get("benchmark_metrics", {}).get("accuracy",
-                          best.get("benchmark_metrics", {}).get("eval_accuracy", 0))
-                new_acc = improved.get("benchmark_metrics", improved.get("metrics", {})).get("accuracy",
-                          improved.get("benchmark_metrics", improved.get("metrics", {})).get("eval_accuracy", 0))
-                if new_acc > old_acc:
+                old_score = _rank_key(best)
+                new_score = _rank_key(improved)
+                if new_score > old_score:
                     best = improved
-                    self._log("improved", f"Iteration {iteration + 1}: {old_acc:.3f} → {new_acc:.3f}")
+                    self._log("improved", f"Iteration {iteration + 1}: score {old_score:.4f} → {new_score:.4f}")
                 else:
-                    self._log("plateau", f"Iteration {iteration + 1}: no improvement ({new_acc:.3f} ≤ {old_acc:.3f})")
+                    self._log("plateau", f"Iteration {iteration + 1}: no improvement ({new_score:.4f} ≤ {old_score:.4f})")
                     break
 
             results["best_approach"] = best
@@ -820,20 +819,37 @@ except Exception as e:
         last_error = ""
         max_fix_attempts = 10
 
+        # Detect MLX-based implementations — they require Metal (Apple Silicon),
+        # so run locally via venv Python instead of Docker.
+        impl_code = (impl_dir / "implementation.py").read_text(errors="ignore")
+        uses_mlx = "mlx_lm" in impl_code or "mlx-community" in impl_code
+
         for attempt in range(max_fix_attempts):
             try:
-                # Docker needs network for pip install
-                docker_cmd = [
-                    "docker", "run", "--rm",
-                    "-v", f"{impl_dir.resolve()}:/workspace",
-                    "-w", "/workspace",
-                    "--memory", "4g", "--cpus", "2",
-                    "python:3.11-slim",
-                    "sh", "-c",
-                    "apt-get update -qq && apt-get install -y -qq tesseract-ocr libgl1-mesa-glx libglib2.0-0 > /dev/null 2>&1; "
-                    "pip install -q -r requirements.txt 2>&1; python smoke_test.py"
-                ]
-                result = await asyncio.to_thread(subprocess.run, docker_cmd, capture_output=True, text=True, timeout=900,)
+                if uses_mlx:
+                    # MLX requires Metal — run locally via venv Python (has mlx_lm installed)
+                    ml_python = self._find_ml_python()
+                    result = await asyncio.to_thread(
+                        subprocess.run,
+                        [ml_python, str(smoke_path.resolve())],
+                        capture_output=True, text=True,
+                        timeout=600,  # first run downloads model (~4 GB), allow 10 min
+                        env={**os.environ, "PYTHONPATH": str(impl_dir.resolve()), "SMOKE_TEST": "1"},
+                        cwd=str(impl_dir.resolve()),
+                    )
+                else:
+                    # Docker for non-MLX implementations
+                    docker_cmd = [
+                        "docker", "run", "--rm",
+                        "-v", f"{impl_dir.resolve()}:/workspace",
+                        "-w", "/workspace",
+                        "--memory", "4g", "--cpus", "2",
+                        "python:3.11-slim",
+                        "sh", "-c",
+                        "apt-get update -qq && apt-get install -y -qq tesseract-ocr libgl1-mesa-glx libglib2.0-0 > /dev/null 2>&1; "
+                        "pip install -q -r requirements.txt 2>&1; python smoke_test.py"
+                    ]
+                    result = await asyncio.to_thread(subprocess.run, docker_cmd, capture_output=True, text=True, timeout=900,)
                 output = result.stdout.strip()[-500:] + "\n" + result.stderr.strip()[-500:]
                 passed = result.returncode == 0
 
@@ -1530,125 +1546,141 @@ Write sections: Summary, Methodology, Results, Best Approach Details, Recommenda
             if (not has_pretrained or has_proper_smoke_guard) and not has_bad_classes:
                 return code
 
-        # Replace with guaranteed-working template
+        # Replace with guaranteed-working MLX template (Apple Silicon M-series)
         import textwrap
         return textwrap.dedent('''\
-            """Auto-patched by pipeline: guaranteed smoke-mode implementation."""
-            import os, json
+            """Auto-patched by pipeline: MLX LoRA fine-tuning on Qwen2.5-7B (Apple Silicon)."""
+            import os, json, subprocess, sys, tempfile, re
             from pathlib import Path
             from typing import Dict
-            import numpy as np
-
-            try:
-                from faker import Faker
-                _fake = Faker("ru_RU")
-            except ImportError:
-                class _FakeFaker:
-                    def text(self, **kw): return "sample legal document text"
-                _fake = _FakeFaker()
-
-            from datasets import Dataset
 
             _LABELS = [
                 "court_ruling", "bankruptcy_filing", "gibdd_fine", "creditor_claim",
                 "enforcement_doc", "correspondence", "financial_doc",
             ]
-            _NUM_LABELS = len(_LABELS)
+
+            _SAMPLE_TEXTS = {
+                "court_ruling": "Арбитражный суд рассмотрел дело о банкротстве. Решение: признать требования обоснованными.",
+                "bankruptcy_filing": "Заявление о признании должника несостоятельным банкротом. Сумма задолженности 500000 руб.",
+                "gibdd_fine": "Постановление об административном правонарушении. Нарушение ПДД статья 12.9.",
+                "creditor_claim": "Требование кредитора о включении в реестр требований. Основание: неоплата по договору поставки.",
+                "enforcement_doc": "Исполнительный лист о взыскании задолженности в размере 250000 руб по решению суда.",
+                "correspondence": "Уведомление о введении процедуры наблюдения в отношении должника ООО Ромашка.",
+                "financial_doc": "Анализ финансового состояния должника. Коэффициент текущей ликвидности 0.85.",
+            }
 
 
-            def _gen_data(n=100):
-                return Dataset.from_dict({
-                    "text": [_fake.text(max_nb_chars=200) for _ in range(n)],
-                    "label": [i % _NUM_LABELS for i in range(n)],
-                })
+            def _gen_chat_data(n: int) -> list:
+                """Generate synthetic Russian legal docs in MLX chat format."""
+                data = []
+                for i in range(n):
+                    label = _LABELS[i % len(_LABELS)]
+                    text = _SAMPLE_TEXTS[label] + f" (документ №{i+1})"
+                    data.append({"messages": [
+                        {"role": "user", "content": f"Классифицируй документ:\\n{text}"},
+                        {"role": "assistant", "content": label},
+                    ]})
+                return data
 
 
-            def _load_data(input_path, n=100):
+            def _load_chat_data(input_path: str, n: int) -> list:
+                """Load real JSONL data (messages format) or fall back to synthetic."""
                 p = Path(input_path)
-                for c in list(p.rglob("*.jsonl")) + list(p.rglob("*.json")):
+                for fpath in list(p.rglob("*.jsonl")) + list(p.rglob("*.json")):
                     try:
-                        rows = [json.loads(l) for l in open(c) if l.strip()]
-                        if rows and "text" in rows[0] and "label" in rows[0]:
-                            texts = [r["text"] for r in rows[:n]]
-                            lbls = [r["label"] for r in rows[:n]]
-                            if isinstance(lbls[0], str):
-                                m = {v: i for i, v in enumerate(sorted(set(lbls)))}
-                                lbls = [m[v] for v in lbls]
-                            return Dataset.from_dict({"text": texts, "label": lbls})
+                        rows = [json.loads(line) for line in open(fpath) if line.strip()]
+                        # Support messages format
+                        if rows and "messages" in rows[0]:
+                            return rows[:n]
+                        # Support text+label format — convert to chat
+                        if rows and "text" in rows[0]:
+                            return [{"messages": [
+                                {"role": "user", "content": f"Классифицируй: {r['text'][:300]}"},
+                                {"role": "assistant", "content": str(r.get("label", "unknown"))},
+                            ]} for r in rows[:n]]
                     except Exception:
                         continue
-                return _gen_data(n)
+                return _gen_chat_data(n)
 
 
-            def _tiny_model_tok():
-                from transformers import AutoConfig, AutoModelForSequenceClassification, PreTrainedTokenizerFast
-                from tokenizers import Tokenizer
-                from tokenizers.models import BPE
-                from tokenizers.pre_tokenizers import Whitespace
-                tok = Tokenizer(BPE()); tok.pre_tokenizer = Whitespace()
-                tokenizer = PreTrainedTokenizerFast(tokenizer_object=tok, pad_token="[PAD]", unk_token="[UNK]")
-                cfg = AutoConfig.for_model("bert", vocab_size=max(tokenizer.vocab_size or 0, 100),
-                                           hidden_size=32, num_hidden_layers=1, num_attention_heads=2,
-                                           intermediate_size=64, max_position_embeddings=128,
-                                           num_labels=_NUM_LABELS)
-                return AutoModelForSequenceClassification.from_config(cfg), tokenizer
+            def _parse_val_loss(output: str) -> float | None:
+                """Extract final val loss from mlx_lm.lora output."""
+                # Matches: "Val loss 2.345" or "val loss: 2.345"
+                for pattern in [r"[Vv]al loss[:\\s]+([0-9]+\\.[0-9]+)", r"validation loss[:\\s]+([0-9]+\\.[0-9]+)"]:
+                    matches = re.findall(pattern, output)
+                    if matches:
+                        return float(matches[-1])
+                return None
 
 
-            def run(input_path: str, smoke: bool = False, num_samples: int = 50) -> Dict:
-                import torch
-                from transformers import (AutoModelForSequenceClassification, AutoTokenizer,
-                                          Trainer, TrainingArguments, DataCollatorWithPadding)
-                from peft import LoraConfig, get_peft_model, TaskType
-                from sklearn.metrics import accuracy_score, f1_score
+            def _parse_tokens_per_sec(output: str) -> float | None:
+                """Extract tokens/sec from mlx_lm.lora output."""
+                matches = re.findall(r"([0-9]+\\.?[0-9]*)\\s*(?:tok/sec|tokens/sec|tokens per sec)", output)
+                if matches:
+                    return float(matches[-1])
+                return None
 
-                if smoke:
-                    model, tokenizer = _tiny_model_tok()
-                else:
-                    mname = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-7B-Instruct")
-                    tokenizer = AutoTokenizer.from_pretrained(mname, trust_remote_code=True)
-                    model = AutoModelForSequenceClassification.from_pretrained(
-                        mname, num_labels=_NUM_LABELS,
-                        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-                        trust_remote_code=True)
 
-                if not tokenizer.pad_token:
-                    tokenizer.pad_token = tokenizer.eos_token or "[PAD]"
-                    if hasattr(model.config, "pad_token_id"):
-                        model.config.pad_token_id = tokenizer.pad_token_id
+            def run(input_path: str, smoke: bool = False, num_samples: int = 200) -> Dict:
+                model = os.environ.get("MODEL_NAME", "mlx-community/Qwen2.5-7B-Instruct-4bit")
+                iters = 3 if smoke else 50
+                num_layers = 1 if smoke else 4
+                batch_size = 1
 
-                lora = LoraConfig(r=16 if smoke else 64, lora_alpha=32 if smoke else 128,
-                                  lora_dropout=0.05, bias="none", task_type=TaskType.SEQ_CLS)
-                model = get_peft_model(model, lora)
+                n_train = max(4, int(num_samples * 0.9))
+                n_val = max(2, int(num_samples * 0.1))
 
-                ds = _load_data(input_path, num_samples)
-                tok_ds = ds.map(lambda ex: tokenizer(ex["text"], padding="max_length",
-                                truncation=True, max_length=128 if smoke else 512), batched=True)
-                tok_ds = tok_ds.rename_column("label", "labels")
-                tok_ds.set_format("torch", columns=["input_ids", "attention_mask", "labels"])
-                split = tok_ds.train_test_split(test_size=0.2, seed=42)
+                with tempfile.TemporaryDirectory() as tmp:
+                    data_dir = Path(tmp)
+                    train_data = _load_chat_data(input_path, n_train)
+                    val_data = _gen_chat_data(n_val)
 
-                def _metrics(ep):
-                    preds = np.argmax(ep.predictions, axis=-1)
-                    return {"accuracy": accuracy_score(ep.label_ids, preds),
-                            "f1": f1_score(ep.label_ids, preds, average="weighted", zero_division=0)}
+                    (data_dir / "train.jsonl").write_text(
+                        "\\n".join(json.dumps(d, ensure_ascii=False) for d in train_data))
+                    (data_dir / "valid.jsonl").write_text(
+                        "\\n".join(json.dumps(d, ensure_ascii=False) for d in val_data))
+                    (data_dir / "test.jsonl").write_text(
+                        "\\n".join(json.dumps(d, ensure_ascii=False) for d in val_data[:max(1, n_val // 2)]))
 
-                args = TrainingArguments(
-                    output_dir=str(Path(input_path) / "results"),
-                    num_train_epochs=1, max_steps=2 if smoke else -1,
-                    per_device_train_batch_size=4 if smoke else 8,
-                    per_device_eval_batch_size=4 if smoke else 8,
-                    eval_strategy="epoch", logging_steps=1, save_strategy="no",
-                    use_cpu=smoke, report_to="none", disable_tqdm=True)
+                    cmd = [
+                        sys.executable, "-m", "mlx_lm.lora",
+                        "--model", model,
+                        "--train",
+                        "--data", str(data_dir),
+                        "--num-layers", str(num_layers),
+                        "--iters", str(iters),
+                        "--batch-size", str(batch_size),
+                        "--learning-rate", "1e-4",
+                        "--val-batches", "2" if smoke else "5",
+                        "--steps-per-report", "1" if smoke else "10",
+                        "--adapter-path", str(data_dir / "adapters"),
+                    ]
 
-                trainer = Trainer(model=model, args=args, train_dataset=split["train"],
-                                  eval_dataset=split["test"], compute_metrics=_metrics,
-                                  data_collator=DataCollatorWithPadding(tokenizer))
-                trainer.train()
-                m = trainer.evaluate()
-                result = {"status": "success", "mode": "smoke" if smoke else "production",
-                          "num_labels": _NUM_LABELS, **m}
-                print(json.dumps(result, indent=2))
-                return result
+                    proc = subprocess.run(
+                        cmd, capture_output=True, text=True,
+                        timeout=120 if smoke else 600,
+                    )
+                    output = proc.stdout + "\\n" + proc.stderr
+
+                    val_loss = _parse_val_loss(output)
+                    tok_sec = _parse_tokens_per_sec(output)
+
+                    # Normalise to [0,1] accuracy proxy: exp(-val_loss)
+                    accuracy_proxy = float(f"{__import__('math').exp(-(val_loss or 5.0)):.4f}")
+
+                    result = {
+                        "status": "success" if proc.returncode == 0 else "error",
+                        "mode": "smoke" if smoke else "production",
+                        "val_loss": val_loss,
+                        "tokens_per_sec": tok_sec,
+                        "accuracy": accuracy_proxy,
+                        "iters": iters,
+                        "num_layers": num_layers,
+                    }
+                    if proc.returncode != 0:
+                        result["error_tail"] = output[-500:]
+                    print(json.dumps(result, indent=2, default=str))
+                    return result
 
 
             def benchmark(data_dir: str) -> dict:
@@ -1656,10 +1688,9 @@ Write sections: Summary, Methodology, Results, Best Approach Details, Recommenda
 
 
             if __name__ == "__main__":
-                import sys
                 path = sys.argv[1] if len(sys.argv) > 1 else "."
                 sm = "--smoke" in sys.argv or os.environ.get("SMOKE_TEST", "0") == "1"
-                r = run(path, smoke=sm, num_samples=30 if sm else 200)
+                r = run(path, smoke=sm, num_samples=20 if sm else 200)
                 sys.exit(0 if r.get("status") == "success" else 1)
             ''')
 
