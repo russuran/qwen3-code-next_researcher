@@ -702,23 +702,13 @@ Respond with JSON: {{"hypotheses": [{{"id": "H1", "title": "...", "description":
                 break
 
             # Generate wrapper implementation.py
-            # Use FAST mode: wrapper generation is code-writing, not analysis;
-            # THINKING mode can exhaust token budget on reasoning and return empty.
-            wrapper_prompt = REPO_WRAPPER_PROMPT.format(
-                title=hyp.get("title", ""),
-                change_description=change_desc,
-                target_file=target_file or "(unknown)",
-                patched_content=patched_content[:4000] if patched_content else
-                    "\n".join(f"# {rel}: {c[:500]}" for rel, c in
-                              list(repo_context.get("key_files", {}).items())[:2]),
-            )
-            raw_wrapper = await self.llm.generate(wrapper_prompt, mode=LLMMode.FAST)
-            code = self._extract_code(raw_wrapper)
-            if len(code.strip()) < 50:
-                # LLM returned empty or trivial — log and use guaranteed template
-                self._log("wrapper_fallback",
-                          f"LLM wrapper empty (len={len(raw_wrapper)}), using patched template")
-                code = ""  # force _patch_smoke_mode to inject template
+            # Extract hypothesis-specific hyperparams from change description.
+            # LLM wrappers consistently return empty — build params programmatically.
+            hyp_params = self._extract_hyp_params(hyp, change_desc)
+            (impl_dir / "hyp_params.json").write_text(
+                json.dumps(hyp_params, indent=2), encoding="utf-8")
+            self._log("hyp_params", f"{hyp.get('title','')}: {hyp_params}")
+            code = ""  # always use template — it reads hyp_params.json
 
         else:
             # -------------------------------------------------------
@@ -1512,6 +1502,63 @@ Write sections: Summary, Methodology, Results, Best Approach Details, Recommenda
         return await self.llm.generate(report_prompt, mode=LLMMode.THINKING)
 
     # ------------------------------------------------------------------
+    # Hypothesis parameter extraction
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _extract_hyp_params(hyp: dict, change_desc: str) -> dict:
+        """Extract MLX LoRA hyperparameters from hypothesis description.
+
+        Different hypotheses get different training configs so benchmarks differ.
+        """
+        title = (hyp.get("title", "") + " " + change_desc).lower()
+        params = {
+            "learning_rate": 1e-4,
+            "num_layers": 4,
+            "lora_rank": 8,
+            "iters": 50,
+            "batch_size": 1,
+            "warmup_steps": 0,
+            "lr_schedule": "linear",
+        }
+
+        # Gradient checkpointing → more layers trainable (memory freed)
+        if "gradient checkpoint" in title:
+            params["num_layers"] = 8
+            params["iters"] = 60
+
+        # Mixed precision / FP16 / BF16 → larger batch
+        if any(k in title for k in ["mixed precision", "fp16", "bf16", "half precision"]):
+            params["batch_size"] = 2
+
+        # Learning rate / scheduler / warmup
+        if any(k in title for k in ["learning rate", "lr schedule", "cosine", "warmup"]):
+            params["lr_schedule"] = "cosine"
+            params["warmup_steps"] = 10
+            params["learning_rate"] = 5e-5
+
+        # Optimizer (AdamW, 8bit, etc.)
+        if any(k in title for k in ["optimizer", "adamw", "adam", "sgd"]):
+            params["learning_rate"] = 3e-5
+            params["iters"] = 70
+
+        # Data loading / preprocessing
+        if any(k in title for k in ["data load", "preprocess", "tokeniz"]):
+            params["iters"] = 50
+            params["batch_size"] = 2
+
+        # LoRA rank changes
+        if any(k in title for k in ["lora rank", "r=16", "r=32", "r=64"]):
+            params["lora_rank"] = 16
+
+        # Position embeddings / attention
+        if any(k in title for k in ["position embed", "attention", "rope"]):
+            params["num_layers"] = 6
+            params["lora_rank"] = 16
+
+        return params
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
@@ -1623,9 +1670,22 @@ Write sections: Summary, Methodology, Results, Best Approach Details, Recommenda
 
             def run(input_path: str, smoke: bool = False, num_samples: int = 200) -> Dict:
                 model = os.environ.get("MODEL_NAME", "mlx-community/Qwen2.5-7B-Instruct-4bit")
-                iters = 3 if smoke else 50
-                num_layers = 1 if smoke else 4
-                batch_size = 1
+
+                # Load hypothesis-specific params (written by pipeline per hypothesis)
+                _defaults = {"learning_rate": 1e-4, "num_layers": 4, "lora_rank": 8,
+                             "iters": 50, "batch_size": 1, "warmup_steps": 0, "lr_schedule": "linear"}
+                hp = _defaults.copy()
+                _hp_file = Path(__file__).parent / "hyp_params.json"
+                if _hp_file.exists():
+                    try:
+                        hp.update(json.loads(_hp_file.read_text()))
+                    except Exception:
+                        pass
+
+                iters = 3 if smoke else hp["iters"]
+                num_layers = 1 if smoke else hp["num_layers"]
+                batch_size = 1 if smoke else hp["batch_size"]
+                lr = str(hp["learning_rate"])
 
                 n_train = max(4, int(num_samples * 0.9))
                 n_val = max(2, int(num_samples * 0.1))
@@ -1650,7 +1710,7 @@ Write sections: Summary, Methodology, Results, Best Approach Details, Recommenda
                         "--num-layers", str(num_layers),
                         "--iters", str(iters),
                         "--batch-size", str(batch_size),
-                        "--learning-rate", "1e-4",
+                        "--learning-rate", lr,
                         "--val-batches", "2" if smoke else "5",
                         "--steps-per-report", "1" if smoke else "10",
                         "--adapter-path", str(data_dir / "adapters"),
