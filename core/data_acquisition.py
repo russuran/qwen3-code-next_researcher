@@ -72,13 +72,20 @@ class DataAcquisition:
         """Find and download a real dataset. Returns path or None."""
         logger.info("Searching for datasets for: %s", topic[:80])
 
-        # Ask LLM for dataset suggestions
+        datasets: list[dict] = []
+
+        # 1. Direct HuggingFace Hub API search (no LLM needed)
+        hf_datasets = await self._search_huggingface_hub(topic)
+        datasets.extend(hf_datasets)
+
+        # 2. Ask LLM for additional suggestions
         prompt = DATASET_SEARCH_PROMPT.format(task=topic)
         raw = await self.llm.generate(prompt, mode=LLMMode.FAST)
-        datasets = self._parse_suggestions(raw)
+        llm_datasets = self._parse_suggestions(raw)
+        datasets.extend(llm_datasets)
 
         if not datasets:
-            logger.warning("No dataset suggestions from LLM")
+            logger.warning("No datasets found (HF Hub + LLM)")
             return None
 
         # Sort by relevance and try top 3
@@ -90,6 +97,49 @@ class DataAcquisition:
 
         logger.warning("All dataset download attempts failed")
         return None
+
+    async def _search_huggingface_hub(self, topic: str) -> list[dict]:
+        """Direct HuggingFace Hub API search — no LLM needed."""
+        import httpx
+
+        # Extract key terms for search
+        words = topic.lower().split()
+        # Build search queries from topic
+        search_terms = [
+            " ".join(w for w in words if len(w) > 3)[:60],
+        ]
+
+        results = []
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                for query in search_terms:
+                    resp = await client.get(
+                        "https://huggingface.co/api/datasets",
+                        params={"search": query, "limit": 5, "sort": "downloads", "direction": -1},
+                    )
+                    if resp.status_code == 200:
+                        for ds in resp.json():
+                            ds_id = ds.get("id", "")
+                            results.append({
+                                "name": ds_id,
+                                "source": "huggingface",
+                                "identifier": ds_id,
+                                "description": ds.get("description", "")[:200],
+                                "relevance": 7,  # HF Hub results are generally relevant
+                                "downloads": ds.get("downloads", 0),
+                            })
+                        logger.info("HF Hub search '%s': %d datasets", query[:40], len(resp.json()))
+        except Exception as e:
+            logger.warning("HF Hub API search failed: %s", e)
+
+        # Deduplicate by identifier
+        seen = set()
+        deduped = []
+        for r in results:
+            if r["identifier"] not in seen:
+                seen.add(r["identifier"])
+                deduped.append(r)
+        return deduped
 
     async def _try_download(self, ds: dict, topic: str) -> str | None:
         source = ds.get("source", "")

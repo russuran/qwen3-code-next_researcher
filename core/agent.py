@@ -242,6 +242,7 @@ class ResearchAgent:
             )
 
         # Phase 2.5: Relevance filter
+        _update_progress("filter", f"Scoring {sum(len(f.results) for f in findings)} results...")
         if self._stage_enabled("filter") and findings:
             findings = await self._filter_relevant(plan.topic, findings)
             (output_dir / "02_filtered.json").write_text(
@@ -250,6 +251,7 @@ class ResearchAgent:
             )
 
         # Phase 2.7: Deep fetch
+        _update_progress("deep_fetch", f"Downloading {sum(len(f.results) for f in findings)} sources...")
         if self._stage_enabled("deep_fetch") and findings:
             findings = await self._deep_fetch(findings, output_dir)
 
@@ -258,6 +260,7 @@ class ResearchAgent:
                 return output_dir
 
         # Phase 3: Analyze
+        _update_progress("analyze", f"Analyzing {sum(len(f.results) for f in findings)} sources...")
         analyses = []
         if self._stage_enabled("analyze") and findings:
             analyses = await self._analyze(findings)
@@ -271,6 +274,7 @@ class ResearchAgent:
 
         # Phase 3.5: Iterative retrieval (ITER-RETGEN pattern)
         # Perplexity-style: search → read → extract facts → refine queries → repeat
+        _update_progress("iterative", f"ITER-RETGEN: deepening {len(analyses)} analyses...")
         if self._stage_enabled("iterative") and analyses:
             from core.iterative_researcher import IterativeResearcher
             console.print("\n[bold]Phase 3.5:[/bold] Iterative retrieval (ITER-RETGEN)...")
@@ -366,6 +370,7 @@ class ResearchAgent:
             )
 
         # Phase 3.7: Hypothesis generation
+        _update_progress("hypotheses", f"Generating from {len(analyses)} analyses + {len(research_state.fact_bank) if research_state else 0} facts...")
         hypotheses = {}
         if self._stage_enabled("hypotheses") and analyses:
             hypotheses = await self._generate_hypotheses(plan, analyses, research_state=research_state)
@@ -374,6 +379,7 @@ class ResearchAgent:
             )
 
         # Phase 3.8: Contradiction detection
+        _update_progress("contradictions", "Cross-checking claims...")
         if self._stage_enabled("contradictions") and analyses:
             console.print("\n[bold]Phase 3.8:[/bold] Detecting contradictions...")
             self._log(JournalEntry(
@@ -401,6 +407,7 @@ class ResearchAgent:
                 logger.warning("Contradiction detection failed: %s", e)
 
         # Phase 4: Synthesize
+        _update_progress("synthesize", f"Writing report from {len(analyses)} analyses, {len(hypotheses.get('hypotheses', []))} hypotheses...")
         report_path = await self._synthesize(plan, analyses, output_dir, hypotheses, research_state=research_state)
 
         console.print(Panel(

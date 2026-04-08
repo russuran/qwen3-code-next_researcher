@@ -1575,7 +1575,12 @@ Write sections: Summary, Methodology, Results, Best Approach Details, Recommenda
         """Extract MLX LoRA hyperparameters from hypothesis description.
 
         Different hypotheses get different training configs so benchmarks differ.
+        If hypothesis has _override_params (from tree search), use those directly.
         """
+        # Tree search provides explicit params for refine/merge/draft
+        if "_override_params" in hyp:
+            return hyp["_override_params"]
+
         title = (hyp.get("title", "") + " " + change_desc).lower()
         params = {
             "learning_rate": 1e-4,

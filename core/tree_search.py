@@ -156,7 +156,38 @@ class TreeSearchLoop:
                 parent_id=parent_node.id if parent_node else None,
             )
 
-            # 4. Implement
+            # 4. Compute hyp_params based on branch type
+            if branch_type == BranchType.REFINE and parent_node:
+                # Start from parent's best params and tweak
+                base_params = dict(parent_node.hyp_params)
+                # Improve: reduce LR by 30%, add more iters
+                base_params["learning_rate"] = base_params.get("learning_rate", 1e-4) * 0.7
+                base_params["iters"] = min(base_params.get("iters", 50) + 20, 100)
+                hyp["_override_params"] = base_params
+            elif branch_type == BranchType.MERGE:
+                # Combine best aspects of top-2
+                top2 = self.tree.get_best(2)
+                if len(top2) >= 2:
+                    p1, p2 = top2[0].hyp_params, top2[1].hyp_params
+                    merged = {
+                        "learning_rate": min(p1.get("learning_rate", 1e-4), p2.get("learning_rate", 1e-4)),
+                        "num_layers": max(p1.get("num_layers", 4), p2.get("num_layers", 4)),
+                        "iters": max(p1.get("iters", 50), p2.get("iters", 50)),
+                        "batch_size": max(p1.get("batch_size", 1), p2.get("batch_size", 1)),
+                        "lora_rank": max(p1.get("lora_rank", 8), p2.get("lora_rank", 8)),
+                    }
+                    hyp["_override_params"] = merged
+            elif branch_type == BranchType.DRAFT:
+                # Fresh approach — try aggressive params
+                hyp["_override_params"] = {
+                    "learning_rate": 2e-5,
+                    "num_layers": 8,
+                    "iters": 80,
+                    "batch_size": 2,
+                    "lora_rank": 16,
+                }
+
+            # Implement
             if self._implement:
                 impl = await self._implement(
                     hyp,

@@ -164,8 +164,12 @@ Research plan: {{ plan_summary }}
 Analyzed sources:
 {{ analyses }}
 
-CRITICAL: Every factual claim MUST cite its source using [N] notation (e.g., "BERT achieves 89% on SQuAD [3]").
-Do NOT make unsupported claims. If a claim cannot be attributed to a specific source, mark it as [unverified].
+CRITICAL CITATION RULES:
+- Every factual claim MUST have an inline citation using ONLY the format [N] where N is the source number.
+- Example: "Cross-encoders outperform bi-encoders by 5% on MSMARCO [3]."
+- Do NOT write source names in citations. WRONG: "[Paper Title [3]]". CORRECT: "[3]".
+- If a claim cannot be attributed, write [unverified].
+- The References section at the end maps [N] to full source details.
 
 Write a comprehensive report with these sections:
 
