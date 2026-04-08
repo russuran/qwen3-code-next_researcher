@@ -68,7 +68,7 @@ Generate a research plan as JSON with this structure:
     {
       "question": "specific sub-question",
       "priority": 1-5 (5 = highest),
-      "sources": ["arxiv", "semantic_scholar", "github", "papers_with_code"],
+      "sources": ["arxiv", "semantic_scholar", "github", "papers_with_code", "web", "huggingface"],
       "keywords": ["keyword1", "keyword2"]
     }
   ],
@@ -83,7 +83,10 @@ First, classify the topic complexity:
 Then determine search strategy:
 - For academic topics: prioritize arxiv, semantic_scholar
 - For implementation topics: prioritize github, papers_with_code
+- For practical/applied topics: include "web" (blogs, docs, tutorials, forums)
+- For model/dataset discovery: include "huggingface"
 - For comparison topics: use all sources equally
+- IMPORTANT: include "web" source for at least 1-2 questions — it finds practical guides, blog posts, and documentation that academic sources miss
 
 Generate 3-7 sub-questions based on complexity. Each question must be SPECIFIC and SEARCHABLE.
 
