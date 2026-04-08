@@ -1,8 +1,13 @@
-"""Document store: stores parsed documents and chunks."""
+"""Document store: stores parsed documents and chunks.
+
+Supports save/load to JSON for persistence between sessions.
+"""
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
@@ -66,6 +71,26 @@ class DocumentStore:
 
     def total_chunks(self) -> int:
         return sum(len(d.chunks) for d in self._documents.values())
+
+    def save(self, path: str | Path) -> None:
+        """Persist all documents to JSON."""
+        data = [doc.model_dump() for doc in self._documents.values()]
+        Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info("Saved %d documents to %s", len(data), path)
+
+    def load(self, path: str | Path) -> None:
+        """Load documents from JSON. Merges with existing."""
+        p = Path(path)
+        if not p.exists():
+            return
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            for item in data:
+                doc = Document(**item)
+                self._documents[doc.doc_id] = doc
+            logger.info("Loaded %d documents from %s", len(data), path)
+        except Exception as e:
+            logger.warning("Failed to load document store: %s", e)
 
     def _chunk_text(self, doc_id: str, text: str) -> list[Chunk]:
         chunks = []

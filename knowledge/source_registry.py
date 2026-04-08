@@ -1,9 +1,14 @@
-"""Source registry: tracks known sources with versioning metadata."""
+"""Source registry: tracks known sources with versioning metadata.
+
+Supports save/load to JSON for persistence between sessions.
+"""
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
@@ -75,3 +80,21 @@ class SourceRegistry:
 
     def count(self) -> int:
         return len(self._sources)
+
+    def save(self, path: str | Path) -> None:
+        data = [rec.model_dump() for rec in self._sources.values()]
+        Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info("Saved %d source records to %s", len(data), path)
+
+    def load(self, path: str | Path) -> None:
+        p = Path(path)
+        if not p.exists():
+            return
+        try:
+            data = json.loads(p.read_text(encoding="utf-8"))
+            for item in data:
+                rec = SourceRecord(**item)
+                self._sources[rec.url] = rec
+            logger.info("Loaded %d source records from %s", len(data), path)
+        except Exception as e:
+            logger.warning("Failed to load source registry: %s", e)

@@ -157,6 +157,8 @@ class ResearchAgent:
         # Knowledge layer — persistent across runs via knowledge_dir
         knowledge_dir = Path(config.knowledge_dir)
         knowledge_dir.mkdir(parents=True, exist_ok=True)
+        self._knowledge_dir = knowledge_dir
+
         self.source_registry = SourceRegistry()
         self.doc_store = DocumentStore()
         self.cache = CacheManager(cache_dir=str(knowledge_dir / "cache"))
@@ -167,6 +169,15 @@ class ResearchAgent:
         )
         self.evaluator = Evaluator()
         self.claim_verifier = ClaimVerifier(llm)
+
+        # Load persisted knowledge from previous runs
+        self.doc_store.load(knowledge_dir / "documents.json")
+        self.source_registry.load(knowledge_dir / "sources.json")
+        if self.doc_store.count() > 0:
+            self.index.build()
+            logger.info("Loaded knowledge: %d docs, %d sources, %d chunks",
+                        self.doc_store.count(), self.source_registry.count(),
+                        self.doc_store.total_chunks())
 
         # Set global LLM ref for compare_methods tool
         global _llm_ref
@@ -975,9 +986,11 @@ class ResearchAgent:
                 content=a.approach + " " + " ".join(a.strengths + a.weaknesses),
                 doc_type="analysis",
             ))
-        # Build TF-IDF index for cross-session knowledge reuse
+        # Build TF-IDF index + persist knowledge to disk
         if self.doc_store.count() > 0:
             self.index.build()
+            self.doc_store.save(self._knowledge_dir / "documents.json")
+            self.source_registry.save(self._knowledge_dir / "sources.json")
 
         # Evaluate report quality
         source_dicts = []
