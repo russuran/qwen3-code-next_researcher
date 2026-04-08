@@ -68,7 +68,8 @@ class Evaluator:
         # Citation rate: fraction of content paragraphs with [N] citations
         import re
         paragraphs = [p.strip() for p in report.split("\n\n") if len(p.strip()) > 50]
-        cited = sum(1 for p in paragraphs if re.search(r"\[\d+\]", p))
+        # Match [1], [N1], [N2], [unverified] citation patterns
+        cited = sum(1 for p in paragraphs if re.search(r"\[(?:N?\d+|unverified)\]", p))
         metrics.citation_rate = cited / max(len(paragraphs), 1)
 
         # Overall (weighted)
