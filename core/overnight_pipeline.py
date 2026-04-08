@@ -167,8 +167,9 @@ The script must:
 Output ONLY Python code in ```python ... ```
 """
 
-# MLX Qwen2.5-7B-Instruct 4-bit for real hypothesis validation on Apple Silicon M-series
-VALIDATION_MODEL = "mlx-community/Qwen2.5-7B-Instruct-4bit"
+# Default validation model. Override via --validation-model CLI flag or VALIDATION_MODEL env var.
+# MLX models for Apple Silicon, HuggingFace models for CUDA.
+VALIDATION_MODEL = os.environ.get("VALIDATION_MODEL", "mlx-community/Qwen2.5-7B-Instruct-4bit")
 
 REPO_HYPOTHESIS_PROMPT = """\
 You are a senior ML engineer analyzing an existing codebase for the following task:
@@ -333,18 +334,23 @@ class OvernightPipeline:
                     results["error"] = "No hypotheses generated"
                     return results
 
-            # Phase 2: Search for datasets (for later benchmark)
-            self._log("phase", "Phase 2: Searching for datasets")
+            # Phase 2: Acquire real data (download from HuggingFace/Kaggle/URL)
+            self._log("phase", "Phase 2: Autonomous data acquisition")
             if on_progress:
-                await on_progress("data", "Searching for datasets to benchmark against...")
+                await on_progress("data", "Searching and downloading real datasets...")
 
+            from core.data_acquisition import DataAcquisition
+            data_acq = DataAcquisition(self.llm, self.workspace)
+            acquired_data_dir = await data_acq.acquire(topic, repo_context)
+            if acquired_data_dir:
+                self._log("data_acquired", f"Real dataset at {acquired_data_dir}")
+            else:
+                self._log("data_fallback", "No real data found, will use synthetic")
+
+            # Also search for suggestions (kept for user reference)
             datasets = await self._search_datasets(topic)
-            self._log("datasets_found", f"Found {len(datasets)} potential datasets")
-
-            # Save dataset suggestions for user
             (self.workspace / "suggested_datasets.md").write_text(
                 "# Suggested Datasets\n\n"
-                "Upload one of these via the dashboard to run real benchmarks.\n\n"
                 + "\n".join(
                     f"- **{d['name']}** ({d['source']}): {d.get('description', '')[:80]}\n"
                     f"  `{d.get('identifier', '')}`"
@@ -373,60 +379,74 @@ class OvernightPipeline:
             self._log("implementations_done",
                        f"{len(working)} working, {len(failed)} failed smoke test out of {len(implementations)}")
 
-            # Phase 4: Hypothesis validation — actually train with small model, get real metrics.
-            # Runs even without real data (uses synthetic faker data as fallback).
-            data_dir = self._find_real_data()
-
-            if data_dir:
-                # Auto-label: generate ground_truth.json where missing (for OCR tasks)
-                has_gt = any(Path(data_dir).rglob("ground_truth.json"))
-                if not has_gt:
-                    self._log("phase", "Phase 3.9: Auto-labeling dataset (no ground truth found)")
-                    if on_progress:
-                        await on_progress("labeling", "Auto-labeling dataset with cross-validation OCR...")
-                    await self._auto_label_dataset(data_dir)
+            # Phase 4: Benchmark seed hypotheses
+            data_dir = acquired_data_dir or self._find_real_data()
 
             self._log("phase", "Phase 4: Hypothesis validation (real training)")
             if on_progress:
                 model_tag = os.environ.get("VALIDATION_MODEL", VALIDATION_MODEL)
-                data_tag = data_dir or "synthetic faker data"
+                data_tag = data_dir or "synthetic data"
                 await on_progress("benchmark", f"Training with {model_tag} on {data_tag}")
 
             for impl in working:
                 impl_dir = Path(impl["code_path"]).parent
                 metrics = await self._run_benchmark(impl_dir)
                 impl["benchmark_metrics"] = metrics
-                acc = metrics.get("accuracy", metrics.get("eval_accuracy", "?"))
-                f1 = metrics.get("f1", metrics.get("eval_f1", "?"))
-                self._log("benchmark", f"{impl['hypothesis'].get('title','')}: accuracy={acc} f1={f1}")
+                vl = metrics.get("val_loss", "?")
+                self._log("benchmark", f"{impl['hypothesis'].get('title','')}: val_loss={vl}")
 
-            # Rank: prefer lower val_loss (MLX), fall back to higher accuracy (HuggingFace)
-            def _rank_key(impl):
-                bm = impl.get("benchmark_metrics", {})
-                val_loss = bm.get("val_loss")
-                if val_loss is not None:
-                    return -val_loss  # lower loss = better, negate for max()
-                return bm.get("accuracy", bm.get("eval_accuracy", 0))
+            # Phase 4.5: AIDE-style tree search (refine/debug/draft)
+            self._log("phase", "Phase 4.5: Tree search (refine/debug/draft)")
+            if on_progress:
+                await on_progress("tree_search", "Starting AIDE-style tree search...")
 
-            best = max(working, key=_rank_key) if working else {}
-            for iteration in range(self.max_iterations):
-                if not best or not best.get("benchmark_metrics"):
-                    break
-                if on_progress:
-                    await on_progress("improve", f"Improvement iteration {iteration + 1}")
-                improved = await self._improve_implementation(best, data_dir or str(self.workspace), libraries)
-                old_score = _rank_key(best)
-                new_score = _rank_key(improved)
-                if new_score > old_score:
-                    best = improved
-                    self._log("improved", f"Iteration {iteration + 1}: score {old_score:.4f} → {new_score:.4f}")
-                else:
-                    self._log("plateau", f"Iteration {iteration + 1}: no improvement ({new_score:.4f} ≤ {old_score:.4f})")
-                    break
+            from core.solution_tree import SolutionTree
+            from core.tree_search import TreeSearchLoop
 
-            results["best_approach"] = best
-            results["final_metrics"] = best.get("benchmark_metrics", best.get("metrics", {}))
-            results["status"] = "benchmarked" if working else "no_working_implementations"
+            tree = SolutionTree()
+            search = TreeSearchLoop(
+                llm=self.llm,
+                tree=tree,
+                topic=topic,
+                repo_context=repo_context,
+                workspace=str(self.workspace),
+                max_iterations=self.max_iterations,
+                implement_fn=lambda hyp, libs, **kw: self._implement_hypothesis(
+                    hyp, libraries, repo_context=repo_context,
+                ),
+                benchmark_fn=self._run_benchmark,
+                on_progress=on_progress,
+            )
+            await search.seed(working)
+            tree = await search.run()
+
+            # Save tree
+            tree.save(self.workspace / "solution_tree.json")
+
+            # Extract best
+            best_nodes = tree.get_best(1)
+            if best_nodes:
+                best_node = best_nodes[0]
+                results["best_approach"] = {
+                    "hypothesis": best_node.hypothesis,
+                    "benchmark_metrics": best_node.metrics,
+                    "code_path": best_node.code_path,
+                    "branch_type": best_node.branch_type.value,
+                    "depth": best_node.depth,
+                }
+                results["final_metrics"] = best_node.metrics
+            else:
+                results["best_approach"] = {}
+                results["final_metrics"] = {}
+
+            results["solution_tree"] = {
+                "total_nodes": len(tree.nodes),
+                "completed": tree.completed_count(),
+                "failed": len(tree.get_failed()),
+                "best_val_loss": best_nodes[0].val_loss if best_nodes else None,
+            }
+            results["implementations"] = implementations
+            results["status"] = "benchmarked" if tree.completed_count() > 0 else "no_working_implementations"
 
             # Phase 5: Report
             self._log("phase", "Phase 5: Report")
@@ -456,8 +476,11 @@ class OvernightPipeline:
 
     async def _run_research(self, topic: str, sources: list[str] | None) -> dict:
         research_dir = self.workspace / "research"
+        # Shared knowledge dir persists across overnight runs
+        knowledge_dir = str(self.workspace.parent / ".knowledge_store")
         config = AgentConfig(
             output_dir=str(research_dir),
+            knowledge_dir=knowledge_dir,
             sources=sources or ["github", "arxiv"],
             max_results_per_source=7,
             stages=["plan", "search", "filter", "deep_fetch", "analyze", "hypotheses", "synthesize"],
@@ -493,17 +516,33 @@ class OvernightPipeline:
 
         manifest = ingestor.ingest(repo_path)
 
-        # Read key training/model files (up to 5000 chars each).
+        # Read key files across ALL subsystems (training, RAG, data, inference).
         # Higher-priority names come first; we take the best match per name
-        # by preferring paths that contain "train" or "learning" over generic ones.
+        # by preferring paths that contain domain keywords over generic ones.
         priority_names = [
+            # Training
             "train.py", "finetune.py", "train_qlora.py", "fine_tune.py",
             "trainer.py", "eval.py", "evaluate.py",
-            "main.py", "model.py",
+            # RAG / retrieval
+            "search.py", "retrieval.py", "embeddings.py", "store.py",
+            "indexer.py", "reranker.py",
+            # Data generation / processing
+            "generate_sft.py", "generate_data.py", "preprocess.py",
+            "dataset.py", "data_loader.py", "parser.py",
+            # Inference / serving
+            "app.py", "server.py", "inference.py", "predict.py",
+            "prompt_assembly.py",
+            # Core
+            "main.py", "model.py", "config.py",
+            # Meta
             "pyproject.toml", "requirements.txt", "README.md",
         ]
         # Bonus keywords: files whose path contains these words rank higher
-        _TRAIN_KEYWORDS = ("train", "finetune", "fine_tune", "learning", "qlora")
+        _DOMAIN_KEYWORDS = (
+            "train", "finetune", "fine_tune", "learning", "qlora",
+            "rag", "search", "retrieval", "embed", "index",
+            "sft", "dataset", "generate", "preprocess",
+        )
 
         key_files: dict[str, str] = {}
         for fname in priority_names:
@@ -516,7 +555,7 @@ class OvernightPipeline:
             # Prefer candidates whose path contains training-related keywords
             scored = sorted(
                 candidates,
-                key=lambda f: -sum(k in str(f).lower() for k in _TRAIN_KEYWORDS),
+                key=lambda f: -sum(k in str(f).lower() for k in _DOMAIN_KEYWORDS),
             )
             chosen = scored[0]
             rel = str(chosen.relative_to(repo_path))
@@ -533,6 +572,31 @@ class OvernightPipeline:
                 except Exception:
                     pass
 
+        # AST analysis via libcst — structural understanding of the repo
+        ast_summary: dict = {}
+        try:
+            from repo_adaptation.ast_analyzer import ASTAnalyzer
+            analyzer = ASTAnalyzer()
+            ast_result = analyzer.analyze_repo(repo_path)
+            ast_summary = ast_result.summary()
+            # Enrich context with function signatures and class hierarchy
+            ast_summary["classes"] = [
+                {"name": c.name, "bases": c.bases, "methods": c.methods[:10], "file": c.file_path}
+                for c in ast_result.classes[:20]
+            ]
+            ast_summary["key_functions"] = [
+                {"name": f.name, "class": f.class_name, "params": f.params[:5],
+                 "file": f.file_path, "async": f.is_async}
+                for f in ast_result.functions
+                if any(k in f.name.lower() for k in ("train", "eval", "search", "embed", "index", "generate", "run"))
+            ][:15]
+            self._log("ast_analysis", f"libcst: {ast_summary['files']} files, "
+                      f"{ast_summary['functions']} functions, {ast_summary['classes_count']} classes"
+                      if 'classes_count' in ast_summary else
+                      f"libcst: {ast_summary}")
+        except Exception as e:
+            self._log("ast_analysis", f"libcst failed (non-critical): {e}")
+
         self._log("repo_clone", f"Cloned {repo_url} → {repo_path.name}: "
                   f"{manifest.total_files} files, key_files={list(key_files)[:6]}")
         return {
@@ -540,6 +604,7 @@ class OvernightPipeline:
             "repo_path": str(repo_path),
             "manifest": manifest.model_dump(),
             "key_files": key_files,
+            "ast": ast_summary,
         }
 
     async def _generate_repo_hypotheses(self, topic: str, repo_context: dict) -> list[dict]:
@@ -1596,25 +1661,42 @@ Write sections: Summary, Methodology, Results, Best Approach Details, Recommenda
         # Replace with guaranteed-working MLX template (Apple Silicon M-series)
         import textwrap
         return textwrap.dedent('''\
-            """Auto-patched by pipeline: MLX LoRA fine-tuning on Qwen2.5-7B (Apple Silicon)."""
+            """Auto-patched by pipeline: MLX LoRA fine-tuning template."""
             import os, json, subprocess, sys, tempfile, re
             from pathlib import Path
             from typing import Dict
 
-            _LABELS = [
-                "court_ruling", "bankruptcy_filing", "gibdd_fine", "creditor_claim",
-                "enforcement_doc", "correspondence", "financial_doc",
-            ]
-
-            _SAMPLE_TEXTS = {
-                "court_ruling": "Арбитражный суд рассмотрел дело о банкротстве. Решение: признать требования обоснованными.",
-                "bankruptcy_filing": "Заявление о признании должника несостоятельным банкротом. Сумма задолженности 500000 руб.",
-                "gibdd_fine": "Постановление об административном правонарушении. Нарушение ПДД статья 12.9.",
-                "creditor_claim": "Требование кредитора о включении в реестр требований. Основание: неоплата по договору поставки.",
-                "enforcement_doc": "Исполнительный лист о взыскании задолженности в размере 250000 руб по решению суда.",
-                "correspondence": "Уведомление о введении процедуры наблюдения в отношении должника ООО Ромашка.",
-                "financial_doc": "Анализ финансового состояния должника. Коэффициент текущей ликвидности 0.85.",
+            # Labels and sample texts loaded from hyp_params.json if available,
+            # otherwise generic defaults. Override via TASK_LABELS env var (JSON list).
+            _DEFAULT_LABELS = ["class_a", "class_b", "class_c", "class_d", "class_e"]
+            _DEFAULT_SAMPLES = {
+                "class_a": "Sample document text for category A.",
+                "class_b": "Sample document text for category B.",
+                "class_c": "Sample document text for category C.",
+                "class_d": "Sample document text for category D.",
+                "class_e": "Sample document text for category E.",
             }
+
+            def _load_task_config():
+                # Try loading from hyp_params.json (written by pipeline per hypothesis)
+                hp_file = Path(__file__).parent / "hyp_params.json"
+                if hp_file.exists():
+                    try:
+                        hp = json.loads(hp_file.read_text())
+                        if "labels" in hp:
+                            return hp["labels"], hp.get("sample_texts", {})
+                    except Exception:
+                        pass
+                # Try env var
+                env_labels = os.environ.get("TASK_LABELS")
+                if env_labels:
+                    try:
+                        return json.loads(env_labels), {}
+                    except Exception:
+                        pass
+                return _DEFAULT_LABELS, _DEFAULT_SAMPLES
+
+            _LABELS, _SAMPLE_TEXTS = _load_task_config()
 
 
             def _gen_chat_data(n: int) -> list:
@@ -1690,57 +1772,64 @@ Write sections: Summary, Methodology, Results, Best Approach Details, Recommenda
                 n_train = max(4, int(num_samples * 0.9))
                 n_val = max(2, int(num_samples * 0.1))
 
-                with tempfile.TemporaryDirectory() as tmp:
-                    data_dir = Path(tmp)
-                    train_data = _load_chat_data(input_path, n_train)
-                    val_data = _gen_chat_data(n_val)
+                # Use persistent dir for adapters (not tmpdir) so best adapters survive
+                impl_parent = Path(__file__).parent if smoke else Path(input_path)
+                adapter_dir = impl_parent / "adapters"
+                adapter_dir.mkdir(parents=True, exist_ok=True)
 
-                    (data_dir / "train.jsonl").write_text(
-                        "\\n".join(json.dumps(d, ensure_ascii=False) for d in train_data))
-                    (data_dir / "valid.jsonl").write_text(
-                        "\\n".join(json.dumps(d, ensure_ascii=False) for d in val_data))
-                    (data_dir / "test.jsonl").write_text(
-                        "\\n".join(json.dumps(d, ensure_ascii=False) for d in val_data[:max(1, n_val // 2)]))
+                data_dir = impl_parent / "mlx_data"
+                data_dir.mkdir(parents=True, exist_ok=True)
 
-                    cmd = [
-                        sys.executable, "-m", "mlx_lm.lora",
-                        "--model", model,
-                        "--train",
-                        "--data", str(data_dir),
-                        "--num-layers", str(num_layers),
-                        "--iters", str(iters),
-                        "--batch-size", str(batch_size),
-                        "--learning-rate", lr,
-                        "--val-batches", "2" if smoke else "5",
-                        "--steps-per-report", "1" if smoke else "10",
-                        "--adapter-path", str(data_dir / "adapters"),
-                    ]
+                train_data = _load_chat_data(input_path, n_train)
+                val_data = _gen_chat_data(n_val)
 
-                    proc = subprocess.run(
-                        cmd, capture_output=True, text=True,
-                        timeout=120 if smoke else 600,
-                    )
-                    output = proc.stdout + "\\n" + proc.stderr
+                (data_dir / "train.jsonl").write_text(
+                    "\\n".join(json.dumps(d, ensure_ascii=False) for d in train_data))
+                (data_dir / "valid.jsonl").write_text(
+                    "\\n".join(json.dumps(d, ensure_ascii=False) for d in val_data))
+                (data_dir / "test.jsonl").write_text(
+                    "\\n".join(json.dumps(d, ensure_ascii=False) for d in val_data[:max(1, n_val // 2)]))
 
-                    val_loss = _parse_val_loss(output)
-                    tok_sec = _parse_tokens_per_sec(output)
+                cmd = [
+                    sys.executable, "-m", "mlx_lm.lora",
+                    "--model", model,
+                    "--train",
+                    "--data", str(data_dir),
+                    "--num-layers", str(num_layers),
+                    "--iters", str(iters),
+                    "--batch-size", str(batch_size),
+                    "--learning-rate", lr,
+                    "--val-batches", "2" if smoke else "5",
+                    "--steps-per-report", "1" if smoke else "10",
+                    "--adapter-path", str(adapter_dir),
+                ]
 
-                    # Normalise to [0,1] accuracy proxy: exp(-val_loss)
-                    accuracy_proxy = float(f"{__import__('math').exp(-(val_loss or 5.0)):.4f}")
+                proc = subprocess.run(
+                    cmd, capture_output=True, text=True,
+                    timeout=120 if smoke else 600,
+                )
+                output = proc.stdout + "\\n" + proc.stderr
 
-                    result = {
-                        "status": "success" if proc.returncode == 0 else "error",
-                        "mode": "smoke" if smoke else "production",
-                        "val_loss": val_loss,
-                        "tokens_per_sec": tok_sec,
-                        "accuracy": accuracy_proxy,
-                        "iters": iters,
-                        "num_layers": num_layers,
-                    }
-                    if proc.returncode != 0:
-                        result["error_tail"] = output[-500:]
-                    print(json.dumps(result, indent=2, default=str))
-                    return result
+                val_loss = _parse_val_loss(output)
+                tok_sec = _parse_tokens_per_sec(output)
+
+                # Normalise to [0,1] accuracy proxy: exp(-val_loss)
+                accuracy_proxy = float(f"{__import__('math').exp(-(val_loss or 5.0)):.4f}")
+
+                result = {
+                    "status": "success" if proc.returncode == 0 else "error",
+                    "mode": "smoke" if smoke else "production",
+                    "val_loss": val_loss,
+                    "tokens_per_sec": tok_sec,
+                    "accuracy": accuracy_proxy,
+                    "adapter_path": str(adapter_dir),
+                    "iters": iters,
+                    "num_layers": num_layers,
+                }
+                if proc.returncode != 0:
+                    result["error_tail"] = output[-500:]
+                print(json.dumps(result, indent=2, default=str))
+                return result
 
 
             def benchmark(data_dir: str) -> dict:

@@ -23,10 +23,12 @@ router = APIRouter()
 
 class OvernightRequest(BaseModel):
     topic: str
-    libraries: str = "pytesseract, easyocr, Pillow, opencv-python"
-    num_samples: int = 50
-    max_iterations: int = 3
+    repo_url: str | None = None
+    libraries: str = "transformers,peft,datasets,torch,scikit-learn,tokenizers,numpy,faker,mlx-lm"
+    num_samples: int = 200
+    max_iterations: int = 5
     sources: list[str] = ["github", "arxiv"]
+    validation_model: str = "mlx-community/Qwen2.5-7B-Instruct-4bit"
 
 
 @router.post("", status_code=201)
@@ -90,12 +92,17 @@ async def _run_overnight(run_id: UUID, body: OvernightRequest, settings: Setting
                 db.add(event)
                 await db.commit()
 
+            import os
+            if body.validation_model:
+                os.environ["VALIDATION_MODEL"] = body.validation_model
+
             results = await pipeline.run(
                 topic=body.topic,
                 libraries=body.libraries,
                 num_samples=body.num_samples,
                 sources=body.sources,
                 on_progress=on_progress,
+                repo_url=body.repo_url,
             )
 
             run.status = "completed"

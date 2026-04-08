@@ -69,8 +69,8 @@ def _load_config(config_path: str) -> dict:
          "Defaults to cointegrated/rubert-tiny2 (83 MB Russian BERT).",
 )
 @click.option(
-    "--max-iterations", default=2, show_default=True,
-    help="Improvement iterations on the best hypothesis.",
+    "--max-iterations", default=5, show_default=True,
+    help="Tree search iterations (refine/debug/draft cycles).",
 )
 @click.option(
     "--verbose", is_flag=True, help="Enable verbose logging.",

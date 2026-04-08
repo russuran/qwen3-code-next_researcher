@@ -23,6 +23,9 @@ from core.claim_verifier import ClaimVerifier
 from knowledge.source_registry import SourceRegistry
 from knowledge.document_store import Document, DocumentStore
 from knowledge.cache_manager import CacheManager
+from knowledge.index_manager import IndexManager
+from knowledge.change_detector import ChangeDetector
+from knowledge.refresh_scheduler import RefreshScheduler
 from sandbox.evaluator import Evaluator
 
 # Import tool modules so they register themselves
@@ -129,6 +132,7 @@ _ALL_STAGES = ["plan", "search", "filter", "deep_fetch", "analyze", "iterative",
 class AgentConfig(BaseModel):
     output_dir: str = "./output"
     journal_dir: str = "./journal"
+    knowledge_dir: str = "./knowledge_store"
     sources: list[str] = ["arxiv", "semantic_scholar", "github", "papers_with_code"]
     max_results_per_source: int = 20
     parallel_search: bool = True
@@ -150,10 +154,17 @@ class ResearchAgent:
         self.planner = Planner(llm)
         self._journal_path: Path | None = None
 
-        # Knowledge layer
+        # Knowledge layer — persistent across runs via knowledge_dir
+        knowledge_dir = Path(config.knowledge_dir)
+        knowledge_dir.mkdir(parents=True, exist_ok=True)
         self.source_registry = SourceRegistry()
         self.doc_store = DocumentStore()
-        self.cache = CacheManager(cache_dir=str(Path(config.output_dir) / ".cache"))
+        self.cache = CacheManager(cache_dir=str(knowledge_dir / "cache"))
+        self.index = IndexManager(self.doc_store)
+        self.change_detector = ChangeDetector(self.source_registry)
+        self.refresh_scheduler = RefreshScheduler(
+            self.source_registry, self.change_detector, self.cache,
+        )
         self.evaluator = Evaluator()
         self.claim_verifier = ClaimVerifier(llm)
 
@@ -321,6 +332,10 @@ class ResearchAgent:
 
     async def _search(self, plan: ResearchPlan) -> list[Finding]:
         console.print("\n[bold]Phase 2:[/bold] Searching sources...")
+        # Invalidate stale caches (>24h) before searching
+        stale_count = self.refresh_scheduler.invalidate_stale(max_age_hours=24)
+        if stale_count:
+            console.print(f"  [dim]Invalidated {stale_count} stale source caches[/dim]")
         findings: list[Finding] = []
 
         tasks = []
@@ -617,9 +632,24 @@ class ResearchAgent:
         for source_type, item in unique_items:
             full_text = item.get("_full_text", "")
             title = item.get("title") or item.get("name") or ""
+            url = item.get("url") or item.get("pdf_url") or ""
+
+            # Check analysis cache (24h TTL) — avoid re-analyzing same paper
+            cache_key = f"analysis:{url or title}"
+            cached_analysis = self.cache.get("analysis", cache_key)
+            if cached_analysis is not None:
+                try:
+                    analysis = AnalysisResult(raw_source=item, **{
+                        k: v for k, v in cached_analysis.items()
+                        if k in AnalysisResult.model_fields
+                    })
+                    analyses.append(analysis)
+                    console.print(f"  [dim]{title[:60]}[/dim] [green](cached)[/green]")
+                    continue
+                except Exception:
+                    pass  # cache corrupted, re-analyze
 
             if full_text:
-                # Deep analysis with full content
                 prompt = self._inject_date(
                     DEEP_ANALYSIS
                     .replace("{{ source_type }}", source_type)
@@ -628,7 +658,6 @@ class ResearchAgent:
                 )
                 action = "deep_analyze_source"
             else:
-                # Shallow analysis with metadata only
                 content = json.dumps(item, ensure_ascii=False, default=str)
                 prompt = self._inject_date(
                     ANALYSIS
@@ -653,6 +682,8 @@ class ResearchAgent:
                 if not analysis.title:
                     analysis.title = item.get("title", item.get("name", "unknown"))
                 analyses.append(analysis)
+                # Cache analysis result (24h)
+                self.cache.set("analysis", cache_key, data, ttl_seconds=86400)
             except Exception as e:
                 logger.warning("Failed to analyze item: %s", e)
                 analyses.append(AnalysisResult(
@@ -754,7 +785,7 @@ class ResearchAgent:
             "# References\n\n" + "\n".join(refs), encoding="utf-8"
         )
 
-        # Store documents in knowledge layer
+        # Store documents in knowledge layer + build search index
         for a in analyses:
             self.doc_store.add(Document(
                 doc_id=a.title[:60],
@@ -763,6 +794,9 @@ class ResearchAgent:
                 content=a.approach + " " + " ".join(a.strengths + a.weaknesses),
                 doc_type="analysis",
             ))
+        # Build TF-IDF index for cross-session knowledge reuse
+        if self.doc_store.count() > 0:
+            self.index.build()
 
         # Evaluate report quality
         source_dicts = []
