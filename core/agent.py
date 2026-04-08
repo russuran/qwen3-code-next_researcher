@@ -196,6 +196,24 @@ class ResearchAgent:
         # State accumulated across iterative research
         research_state = None
 
+        # Phase 1.5: Recall — check knowledge layer for prior research on this topic
+        prior_knowledge = []
+        if self.doc_store.count() > 0:
+            self.index.build()
+            prior_hits = self.index.search_hybrid(plan.topic, limit=5)
+            if prior_hits:
+                console.print(f"\n[bold]Phase 1.5:[/bold] Recalled {len(prior_hits)} prior knowledge chunks")
+                for chunk, score in prior_hits:
+                    prior_knowledge.append({
+                        "title": chunk.doc_id, "content": chunk.text[:500],
+                        "score": score, "_source": "knowledge_store",
+                    })
+                self._log(JournalEntry(
+                    timestamp=self._now(), phase="recall",
+                    action="prior_knowledge",
+                    result_summary=f"Recalled {len(prior_hits)} relevant chunks from prior research",
+                ))
+
         # Phase 2: Search
         findings = []
         if self._stage_enabled("search"):

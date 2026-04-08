@@ -15,6 +15,7 @@ class EvalMetrics(BaseModel):
     source_diversity: float = 0.0  # 0-1: variety of source types
     factual_density: float = 0.0   # facts per 100 words
     code_presence: float = 0.0     # 0-1: code examples included
+    citation_rate: float = 0.0     # 0-1: fraction of paragraphs with [N] citations
     overall: float = 0.0
 
 
@@ -64,13 +65,20 @@ class Evaluator:
         links = report.count("http")
         metrics.groundedness = min(links / max(len(sources), 1), 1.0)
 
-        # Overall
+        # Citation rate: fraction of content paragraphs with [N] citations
+        import re
+        paragraphs = [p.strip() for p in report.split("\n\n") if len(p.strip()) > 50]
+        cited = sum(1 for p in paragraphs if re.search(r"\[\d+\]", p))
+        metrics.citation_rate = cited / max(len(paragraphs), 1)
+
+        # Overall (weighted)
         metrics.overall = (
-            metrics.groundedness * 0.25 +
-            metrics.coverage * 0.25 +
-            metrics.source_diversity * 0.15 +
-            metrics.code_presence * 0.15 +
-            metrics.factual_density * 0.2
+            metrics.groundedness * 0.20 +
+            metrics.coverage * 0.20 +
+            metrics.source_diversity * 0.10 +
+            metrics.code_presence * 0.10 +
+            metrics.factual_density * 0.15 +
+            metrics.citation_rate * 0.25   # citations are critical
         )
 
         return metrics

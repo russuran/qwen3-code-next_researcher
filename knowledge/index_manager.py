@@ -77,6 +77,49 @@ class IndexManager:
 
         return results
 
+    def search_hybrid(self, query: str, limit: int = 10) -> list[tuple[Chunk, float]]:
+        """Hybrid search: TF-IDF + n-gram overlap for better recall.
+
+        Combines lexical TF-IDF with character n-gram overlap scoring.
+        This is a lightweight hybrid approach. For production, replace with
+        dense embeddings (sentence-transformers) + BM25.
+        """
+        tfidf_results = self.search(query, limit=limit * 2)
+        ngram_scores = self._ngram_score(query)
+
+        # Merge scores with weights
+        combined: dict[str, float] = {}
+        tfidf_max = max((s for _, s in tfidf_results), default=1.0) or 1.0
+        ngram_max = max(ngram_scores.values(), default=1.0) or 1.0
+
+        for chunk, score in tfidf_results:
+            combined[chunk.chunk_id] = 0.6 * (score / tfidf_max)
+
+        for chunk_id, score in ngram_scores.items():
+            existing = combined.get(chunk_id, 0.0)
+            combined[chunk_id] = existing + 0.4 * (score / ngram_max)
+
+        ranked = sorted(combined.items(), key=lambda x: -x[1])[:limit]
+        return [(self._chunk_map[cid], score) for cid, score in ranked if cid in self._chunk_map]
+
+    def _ngram_score(self, query: str, n: int = 3) -> dict[str, float]:
+        """Score chunks by character n-gram overlap with query."""
+        query_ngrams = set(self._char_ngrams(query.lower(), n))
+        if not query_ngrams:
+            return {}
+
+        scores = {}
+        for chunk_id, chunk in self._chunk_map.items():
+            chunk_ngrams = set(self._char_ngrams(chunk.text.lower()[:500], n))
+            if chunk_ngrams:
+                overlap = len(query_ngrams & chunk_ngrams)
+                scores[chunk_id] = overlap / len(query_ngrams)
+        return scores
+
+    @staticmethod
+    def _char_ngrams(text: str, n: int = 3) -> list[str]:
+        return [text[i:i+n] for i in range(len(text) - n + 1)]
+
     @staticmethod
     def _tokenize(text: str) -> list[str]:
         return [w.lower().strip(".,!?;:()[]{}\"'") for w in text.split() if len(w.strip(".,!?;:()[]{}\"'")) > 2]
