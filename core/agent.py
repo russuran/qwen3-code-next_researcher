@@ -43,7 +43,7 @@ console = Console()
 
 class JournalEntry(BaseModel):
     timestamp: str
-    phase: Literal["plan", "search", "analyze", "synthesize"]
+    phase: Literal["plan", "search", "recall", "analyze", "synthesize"]
     action: str
     tool_name: str | None = None
     tool_input: dict[str, Any] | None = None
