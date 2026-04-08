@@ -133,7 +133,7 @@ class AgentConfig(BaseModel):
     output_dir: str = "./output"
     journal_dir: str = "./journal"
     knowledge_dir: str = "./knowledge_store"
-    sources: list[str] = ["arxiv", "semantic_scholar", "github", "papers_with_code"]
+    sources: list[str] = ["arxiv", "semantic_scholar", "github", "papers_with_code", "web"]
     max_results_per_source: int = 20
     parallel_search: bool = True
     verbose: bool = False
@@ -295,7 +295,7 @@ class ResearchAgent:
                 tool_map = {
                     "arxiv": "search_arxiv", "github": "search_github",
                     "semantic_scholar": "search_semantic_scholar",
-                    "web": "search_arxiv",  # fallback
+                    "web": "search_web", "huggingface": "search_huggingface",
                 }
                 tool_name = tool_map.get(source, "search_arxiv")
                 cache_key = f"{tool_name}:{query}:{self.config.max_results_per_source}"

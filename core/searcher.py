@@ -211,3 +211,52 @@ async def search_huggingface(query: str, max_results: int = 10, resource_type: s
         })
 
     return ToolResult(tool_name="search_huggingface", success=True, data=results)
+
+
+# ---------------------------------------------------------------------------
+# Tavily (web search — blogs, docs, Stack Overflow, Habr, etc.)
+# ---------------------------------------------------------------------------
+
+_TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
+
+@registry.register(
+    name="search_web",
+    description="Search the web via Tavily API. Returns titles, URLs, and content snippets from blogs, docs, forums.",
+    params=[
+        ToolParam(name="query", type="str", description="Search query"),
+        ToolParam(name="max_results", type="int", description="Max results", required=False, default=5),
+    ],
+)
+async def search_web(query: str, max_results: int = 5) -> ToolResult:
+    api_key = _TAVILY_API_KEY
+    if not api_key:
+        return ToolResult(tool_name="search_web", success=False, error="TAVILY_API_KEY not set")
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key": api_key,
+                    "query": query,
+                    "max_results": max_results,
+                    "search_depth": "advanced",
+                    "include_answer": False,
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        return ToolResult(tool_name="search_web", success=False, error=str(e))
+
+    results = []
+    for item in data.get("results", [])[:max_results]:
+        results.append({
+            "title": item.get("title", ""),
+            "url": item.get("url", ""),
+            "abstract": item.get("content", "")[:500],
+            "_full_text": item.get("content", ""),
+            "_source_type": "web",
+        })
+
+    return ToolResult(tool_name="search_web", success=True, data=results)
