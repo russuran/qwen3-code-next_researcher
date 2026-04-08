@@ -291,6 +291,21 @@ class IterativeResearcher:
         self.max_facts_per_source = max_facts_per_source
         self.checkpoint_path = checkpoint_path
 
+    @staticmethod
+    def estimate_depth(num_sub_questions: int, topic_words: int) -> int:
+        """Estimate optimal iteration count based on topic complexity.
+
+        Simple heuristic:
+        - 1-3 sub-questions (simple): 2 iterations
+        - 4-5 sub-questions (moderate): 3 iterations
+        - 6+ sub-questions (complex): 4 iterations
+        - Very long topic (>15 words): +1 iteration
+        """
+        base = 2 if num_sub_questions <= 3 else 3 if num_sub_questions <= 5 else 4
+        if topic_words > 15:
+            base += 1
+        return min(base, 6)  # cap at 6 for Ollama
+
     async def research(self, topic: str, initial_queries: list[dict] | None = None) -> ResearchState:
         """Run iterative research loop. Returns accumulated state."""
         state = ResearchState(topic=topic)

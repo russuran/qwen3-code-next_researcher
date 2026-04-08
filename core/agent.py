@@ -189,6 +189,23 @@ class ResearchAgent:
             plan.model_dump_json(indent=2), encoding="utf-8"
         )
 
+        # Live progress file (Manus todo.md pattern — recency bias anchoring)
+        progress_path = output_dir / "PROGRESS.md"
+        def _update_progress(phase: str, detail: str = "") -> None:
+            lines = [
+                f"# Research: {topic[:80]}",
+                f"**Current phase:** {phase}",
+                f"**Detail:** {detail}" if detail else "",
+                "",
+                "## Completed",
+            ]
+            for stage_name in stages:
+                done = phase in stages and stages.index(stage_name) < stages.index(phase)
+                marker = "x" if done else " "
+                lines.append(f"- [{marker}] {stage_name}")
+            progress_path.write_text("\n".join(lines), encoding="utf-8")
+        _update_progress("plan", f"{len(plan.sub_questions)} sub-questions")
+
         if self.config.intervene:
             if not await self._check_intervention("plan", plan):
                 return output_dir
@@ -215,6 +232,7 @@ class ResearchAgent:
                 ))
 
         # Phase 2: Search
+        _update_progress("search", "Querying arxiv, github, semantic scholar...")
         findings = []
         if self._stage_enabled("search"):
             findings = await self._search(plan)
