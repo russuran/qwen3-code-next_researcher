@@ -433,6 +433,42 @@ class ResearchAgent:
     # Phase 1: Planning
     # ------------------------------------------------------------------
 
+    def _build_domain_context(self, topic: str) -> str:
+        """Build domain context from existing knowledge + domain hints file."""
+        parts: list[str] = []
+
+        # 1. Prior knowledge from document store
+        if self.doc_store.count() > 0:
+            parts.append(f"EXISTING KNOWLEDGE ({self.doc_store.count()} documents from prior research):")
+            for doc in self.doc_store.list_documents()[:5]:
+                parts.append(f"  - {doc.title}: {doc.content[:100]}")
+
+        # 2. Domain knowledge file (curated hints)
+        domain_file = self._knowledge_dir / "domain_hints.md"
+        if domain_file.exists():
+            parts.append("\nDOMAIN-SPECIFIC RESOURCES (curated):")
+            parts.append(domain_file.read_text(encoding="utf-8")[:2000])
+
+        # 3. Language detection → suggest non-English resources
+        topic_lower = topic.lower()
+        if any(w in topic_lower for w in ["russian", "русск", "рф", "фз", "банкротств", "127-fz"]):
+            parts.append(
+                "\nRUSSIAN LANGUAGE CONTEXT:"
+                "\n- Search for Russian-specific models: ruBERT, ruGPT, FRED-T5, cointegrated/rubert-tiny2"
+                "\n- Russian legal data sources: kad.arbitr.ru (court cases), pravo.gov.ru (legislation)"
+                "\n- Commercial APIs: ГАРАНТ, КонсультантПлюс (legal databases)"
+                "\n- HuggingFace models: search for language:ru, tags:legal"
+                "\n- Include at least one sub-question targeting Russian-language resources specifically"
+            )
+        if any(w in topic_lower for w in ["chinese", "中文", "法律"]):
+            parts.append("\nCHINESE LANGUAGE CONTEXT: search for Chinese-specific models and legal databases")
+        if any(w in topic_lower for w in ["german", "deutsch", "recht"]):
+            parts.append("\nGERMAN LANGUAGE CONTEXT: search for German legal models and Open Legal Data")
+
+        if not parts:
+            return ""
+        return "\n".join(parts)
+
     async def _plan(self, topic: str) -> ResearchPlan:
         console.print("[bold]Phase 1:[/bold] Generating research plan...")
         self._log(JournalEntry(
@@ -440,7 +476,8 @@ class ResearchAgent:
             action="generate_plan", result_summary=f"Topic: {topic}",
         ))
 
-        plan = await self.planner.generate_plan(topic)
+        domain_context = self._build_domain_context(topic)
+        plan = await self.planner.generate_plan(topic, domain_context=domain_context)
 
         for sq in plan.sub_questions:
             console.print(f"  [dim]P{sq.priority}[/dim] {sq.question}")

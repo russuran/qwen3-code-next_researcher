@@ -50,8 +50,12 @@ class Planner:
             .replace("{{ current_year }}", str(now.year))
         )
 
-    async def generate_plan(self, topic: str) -> ResearchPlan:
-        prompt = self._inject_date(PLAN_GENERATION.replace("{{ topic }}", topic))
+    async def generate_plan(self, topic: str, domain_context: str = "") -> ResearchPlan:
+        prompt = self._inject_date(
+            PLAN_GENERATION
+            .replace("{{ topic }}", topic)
+            .replace("{{ domain_context }}", domain_context)
+        )
 
         raw = await self.llm.generate(prompt, mode=LLMMode.THINKING)
 

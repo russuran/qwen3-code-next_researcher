@@ -170,3 +170,44 @@ async def search_papers_with_code(query: str, max_results: int = 10) -> ToolResu
         })
 
     return ToolResult(tool_name="search_papers_with_code", success=True, data=results)
+
+
+# ---------------------------------------------------------------------------
+# HuggingFace Hub (models + datasets)
+# ---------------------------------------------------------------------------
+
+@registry.register(
+    name="search_huggingface",
+    description="Search HuggingFace Hub for models and datasets. Supports language filter.",
+    params=[
+        ToolParam(name="query", type="str", description="Search query"),
+        ToolParam(name="max_results", type="int", description="Max results", required=False, default=10),
+        ToolParam(name="resource_type", type="str", description="'models' or 'datasets'", required=False, default="models"),
+    ],
+)
+async def search_huggingface(query: str, max_results: int = 10, resource_type: str = "models") -> ToolResult:
+    endpoint = f"https://huggingface.co/api/{resource_type}"
+    params = {"search": query, "limit": max_results, "sort": "downloads", "direction": "-1"}
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(endpoint, params=params)
+            resp.raise_for_status()
+            data = resp.json()
+    except Exception as e:
+        return ToolResult(tool_name="search_huggingface", success=False, error=str(e))
+
+    results = []
+    for item in data[:max_results]:
+        item_id = item.get("id") or item.get("modelId", "")
+        results.append({
+            "name": item_id,
+            "title": item_id,
+            "url": f"https://huggingface.co/{item_id}",
+            "description": (item.get("description") or item.get("cardData", {}).get("description", ""))[:300],
+            "downloads": item.get("downloads", 0),
+            "likes": item.get("likes", 0),
+            "tags": item.get("tags", [])[:5],
+        })
+
+    return ToolResult(tool_name="search_huggingface", success=True, data=results)

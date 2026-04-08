@@ -59,6 +59,8 @@ Focus on sources from 2024-{{ current_year }} (recent and state-of-the-art).
 
 Research topic: {{ topic }}
 
+{{ domain_context }}
+
 Generate a research plan as JSON with this structure:
 {
   "topic": "original topic",
