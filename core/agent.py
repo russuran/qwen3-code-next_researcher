@@ -937,14 +937,62 @@ class ResearchAgent:
             if uncertainties:
                 hypotheses_text += "\n\nUncertainties:\n" + "\n".join(f"- {u}" for u in uncertainties)
 
+        # Build numbered reference map from REAL sources (not LLM-generated)
+        ref_map: dict[int, dict] = {}
+        for i, a in enumerate(analyses, 1):
+            src = a.raw_source
+            url = src.get("url") or src.get("pdf_url") or src.get("paper_url") or src.get("html_url", "")
+            ref_map[i] = {"title": a.title, "url": url}
+
+        reference_list = "\n".join(
+            f"[{i}] {r['title']} — {r['url']}" for i, r in ref_map.items()
+        )
+
+        # Inject reference map into prompt so LLM uses real [N] numbers
+        ref_instruction = (
+            f"\n\nAVAILABLE SOURCES (use ONLY these [N] citations, do NOT invent URLs):\n"
+            f"{reference_list}\n\n"
+            f"RULES: Use [1], [2], etc. to cite. The References section is already built — "
+            f"do NOT write your own References section. Do NOT generate URLs."
+        )
+
         prompt = self._inject_date(
             SYNTHESIS
             .replace("{{ topic }}", plan.topic)
             .replace("{{ plan_summary }}", plan_summary)
-            .replace("{{ analyses }}", analyses_text[:8000] + facts_section + citations_section + hypotheses_text)
+            .replace("{{ analyses }}", analyses_text[:7000] + ref_instruction + facts_section + citations_section + hypotheses_text)
         )
 
         report = await self.llm.generate(prompt, mode=LLMMode.THINKING)
+
+        # Post-process: strip any LLM-generated References section (we build our own)
+        import re
+        report = re.split(r'\n## (?:8\.|9\.)?\s*References\b', report, maxsplit=1)[0]
+
+        # Append real references
+        report += "\n\n## References\n\n" + "\n".join(
+            f"[{i}] **{r['title']}** — {r['url']}" for i, r in ref_map.items()
+        ) + "\n"
+
+        # Validate: flag fake URLs and suspicious metrics
+        fake_urls = re.findall(r'https?://example\.com\S*', report)
+        if fake_urls:
+            report = re.sub(r'https?://example\.com\S*', '[URL not available]', report)
+            report += f"\n\n> **WARNING**: {len(fake_urls)} placeholder URL(s) replaced with [URL not available].\n"
+
+        # Flag suspicious metrics (LLM-hallucinated numbers without source)
+        suspicious = re.findall(r'(?:achieves?|scores?|reaches?|obtains?)\s+(\d{2,3}%|\d\.\d+)', report)
+        # Only flag if the number doesn't appear near a citation [N]
+        unfounded_metrics = []
+        for match in suspicious:
+            # Check if there's a [N] within 50 chars
+            idx = report.find(match)
+            if idx >= 0:
+                context = report[max(0, idx-20):idx+len(match)+30]
+                if not re.search(r'\[\d+\]', context):
+                    unfounded_metrics.append(match)
+        if unfounded_metrics:
+            report += f"\n> **NOTE**: {len(unfounded_metrics)} metric(s) without citation — may be LLM-generated: {', '.join(unfounded_metrics[:5])}\n"
 
         # Save synthesis
         report_path = output_dir / "07_synthesis.md"
