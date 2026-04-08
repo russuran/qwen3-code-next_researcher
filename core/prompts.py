@@ -73,7 +73,17 @@ Generate a research plan as JSON with this structure:
   "scope_notes": "brief description of what is in scope and out of scope"
 }
 
-Generate 3-7 sub-questions. Each question must be SPECIFIC and SEARCHABLE.
+First, classify the topic complexity:
+- "simple": well-known topic, 2-3 sub-questions sufficient
+- "moderate": needs multiple angles, 4-5 sub-questions
+- "complex": cutting-edge/multi-disciplinary, 6-7 sub-questions with diverse sources
+
+Then determine search strategy:
+- For academic topics: prioritize arxiv, semantic_scholar
+- For implementation topics: prioritize github, papers_with_code
+- For comparison topics: use all sources equally
+
+Generate 3-7 sub-questions based on complexity. Each question must be SPECIFIC and SEARCHABLE.
 
 CRITICAL RULES:
 - ALL questions and keywords MUST be in ENGLISH regardless of the input language
@@ -81,6 +91,8 @@ CRITICAL RULES:
 - Include the CORE TOPIC in every question (e.g. "passport OCR", not just "OCR")
 - Be specific: "Tesseract vs EasyOCR for Russian document recognition" not "OCR trade-offs"
 - Keywords must contain domain-specific terms, not generic words like "challenges" or "trade-offs"
+- Include at least one question targeting contradictions/debates in the field
+- Include at least one question targeting the LATEST developments (2025-2026)
 - Keywords should be English technical terms suitable for GitHub/arXiv search
 
 Prioritize:
@@ -152,35 +164,43 @@ Research plan: {{ plan_summary }}
 Analyzed sources:
 {{ analyses }}
 
+CRITICAL: Every factual claim MUST cite its source using [N] notation (e.g., "BERT achieves 89% on SQuAD [3]").
+Do NOT make unsupported claims. If a claim cannot be attributed to a specific source, mark it as [unverified].
+
 Write a comprehensive report with these sections:
 
 # {{ topic }}
 
 ## 1. Overview
-Brief introduction to the topic and scope of the research.
+Brief introduction to the topic and scope of the research. State key findings upfront.
 
 ## 2. Approaches and Methods
 Detailed description of each approach found, grouped by category.
+Every method description must cite the source paper/repo [N].
 
 ## 3. Comparison Table
-| Method | Approach | Strengths | Weaknesses | Code Available |
-|--------|----------|-----------|------------|----------------|
+| Method | Approach | Key Metric | Strengths | Weaknesses | Source |
+|--------|----------|------------|-----------|------------|--------|
 
 ## 4. Key Implementations
-Notable code repositories with descriptions and links.
+Notable code repositories with descriptions and links. Include stars/forks if available.
 
-## 5. Hypotheses for Implementation
+## 5. Verified Facts
+High-confidence findings corroborated by multiple sources. Flag any contradictions.
+
+## 6. Hypotheses for Implementation
 If hypotheses are provided, include them with title, description, expected outcome, \
-validation method, priority and effort.
+validation method, priority and effort. Ground each hypothesis in specific verified facts.
 
-## 6. Limitations and Uncertainties
+## 7. Limitations and Uncertainties
 Knowledge gaps, contradictions between sources, areas needing further investigation.
+Explicitly state what was NOT found despite searching.
 
-## 7. Recommendations
-Based on the analysis, which approaches are most promising and why.
+## 8. Recommendations
+Based on the analysis, which approaches are most promising and why. Be specific.
 
-## 8. References
-Full bibliography of all sources consulted with URLs.
+## 9. References
+Full numbered bibliography [1]-[N] of all sources consulted with URLs.
 
 Write in a clear, technical style. Include code links and evidence where available.
 """

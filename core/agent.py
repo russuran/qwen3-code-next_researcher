@@ -193,6 +193,9 @@ class ResearchAgent:
             if not await self._check_intervention("plan", plan):
                 return output_dir
 
+        # State accumulated across iterative research
+        research_state = None
+
         # Phase 2: Search
         findings = []
         if self._stage_enabled("search"):
@@ -230,37 +233,106 @@ class ResearchAgent:
                     a.model_dump_json(indent=2), encoding="utf-8"
                 )
 
-        # Phase 3.5: Iterative deepening
+        # Phase 3.5: Iterative retrieval (ITER-RETGEN pattern)
+        # Perplexity-style: search → read → extract facts → refine queries → repeat
         if self._stage_enabled("iterative") and analyses:
-            refined_queries = await self.planner.refine_plan(
-                plan,
-                "\n".join(f"- {a.title}: {a.approach[:100]}" for a in analyses[:10]),
+            from core.iterative_researcher import IterativeResearcher
+            console.print("\n[bold]Phase 3.5:[/bold] Iterative retrieval (ITER-RETGEN)...")
+
+            async def _search_adapter(query: str, source: str) -> list[dict]:
+                """Adapter: route search to our tool registry."""
+                tool_map = {
+                    "arxiv": "search_arxiv", "github": "search_github",
+                    "semantic_scholar": "search_semantic_scholar",
+                    "web": "search_arxiv",  # fallback
+                }
+                tool_name = tool_map.get(source, "search_arxiv")
+                cache_key = f"{tool_name}:{query}:{self.config.max_results_per_source}"
+                cached = self.cache.get("search", cache_key)
+                if cached is not None:
+                    return cached
+                result = await self.registry.execute(
+                    tool_name, query=query, max_results=self.config.max_results_per_source,
+                )
+                if result.success and result.data:
+                    data = result.data if isinstance(result.data, list) else []
+                    if data:
+                        self.cache.set("search", cache_key, data, ttl_seconds=3600)
+                    for item in data:
+                        item["_source_type"] = source
+                    return data
+                return []
+
+            # Build initial queries from first-round analyses
+            initial_queries = [
+                {"query": a.title, "target_source": "arxiv", "reason": "deepen analysis"}
+                for a in analyses[:5]
+            ]
+
+            researcher = IterativeResearcher(
+                llm=self.llm,
+                search_fn=_search_adapter,
+                max_iterations=3,
+                novelty_threshold=0.1,
+                checkpoint_path=str(output_dir / "03b_research_state.json"),
             )
-            if refined_queries:
-                console.print(f"\n[bold]Iterative deepening:[/bold] {len(refined_queries)} refined queries")
-                self._log(JournalEntry(
-                    timestamp=self._now(), phase="search",
-                    action="iterative_deepening",
-                    result_summary=f"{len(refined_queries)} refined queries",
-                ))
-                extra_findings = await self._search_refined(refined_queries)
-                if extra_findings:
-                    if self._stage_enabled("filter"):
-                        extra_findings = await self._filter_relevant(plan.topic, extra_findings)
-                    extra_analyses = await self._analyze(extra_findings)
-                    analyses.extend(extra_analyses)
-                    summaries_dir = output_dir / "05_summaries"
-                    summaries_dir.mkdir(exist_ok=True)
-                    for i, a in enumerate(extra_analyses, len(analyses) - len(extra_analyses)):
-                        safe_title = "".join(c if c.isalnum() or c in "-_ " else "_" for c in a.title[:50]).strip()
-                        (summaries_dir / f"{i:03d}_{safe_title}.json").write_text(
-                            a.model_dump_json(indent=2), encoding="utf-8"
-                        )
+            research_state = await researcher.research(plan.topic, initial_queries)
+
+            self._log(JournalEntry(
+                timestamp=self._now(), phase="search",
+                action="iterative_research_done",
+                result_summary=(
+                    f"{len(research_state.iterations)} iterations, "
+                    f"{len(research_state.fact_bank)} facts, "
+                    f"{len(research_state.all_sources)} sources, "
+                    f"{research_state.total_queries} queries"
+                ),
+            ))
+            console.print(
+                f"  [green]Iterative research: {len(research_state.fact_bank)} facts from "
+                f"{len(research_state.all_sources)} sources ({research_state.total_queries} queries)[/green]"
+            )
+
+            # Convert new sources to findings → analyses
+            extra_findings = []
+            for src in research_state.all_sources:
+                if src.content or src.snippet:
+                    extra_findings.append(Finding(
+                        source=src.source_type,
+                        query=plan.topic,
+                        results=[{
+                            "title": src.title, "url": src.url,
+                            "abstract": src.snippet, "_full_text": src.content,
+                            "_source_type": src.source_type,
+                        }],
+                    ))
+
+            if extra_findings:
+                if self._stage_enabled("filter"):
+                    extra_findings = await self._filter_relevant(plan.topic, extra_findings)
+                extra_analyses = await self._analyze(extra_findings)
+                analyses.extend(extra_analyses)
+                summaries_dir = output_dir / "05_summaries"
+                summaries_dir.mkdir(exist_ok=True)
+                for i, a in enumerate(extra_analyses, len(analyses) - len(extra_analyses)):
+                    safe_title = "".join(c if c.isalnum() or c in "-_ " else "_" for c in a.title[:50]).strip()
+                    (summaries_dir / f"{i:03d}_{safe_title}.json").write_text(
+                        a.model_dump_json(indent=2), encoding="utf-8"
+                    )
+
+            # Save fact bank and research state
+            (output_dir / "03b_fact_bank.json").write_text(
+                json.dumps([{
+                    "claim": f.claim, "source": f.source_title,
+                    "confidence": f.confidence, "corroboration": f.corroboration_count,
+                } for f in research_state.fact_bank], indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
 
         # Phase 3.7: Hypothesis generation
         hypotheses = {}
         if self._stage_enabled("hypotheses") and analyses:
-            hypotheses = await self._generate_hypotheses(plan, analyses)
+            hypotheses = await self._generate_hypotheses(plan, analyses, research_state=research_state)
             (output_dir / "04_hypotheses.json").write_text(
                 json.dumps(hypotheses, ensure_ascii=False, indent=2), encoding="utf-8"
             )
@@ -293,7 +365,7 @@ class ResearchAgent:
                 logger.warning("Contradiction detection failed: %s", e)
 
         # Phase 4: Synthesize
-        report_path = await self._synthesize(plan, analyses, output_dir, hypotheses)
+        report_path = await self._synthesize(plan, analyses, output_dir, hypotheses, research_state=research_state)
 
         console.print(Panel(
             f"[bold green]Research complete![/bold green]\n"
@@ -424,7 +496,23 @@ class ResearchAgent:
                 if r:
                     findings.append(r)
 
-        console.print(f"  [green]Found {sum(len(f.results) for f in findings)} total results[/green]")
+        # Deduplicate by URL across all findings
+        seen_urls: set[str] = set()
+        total_before = sum(len(f.results) for f in findings)
+        for finding in findings:
+            deduped = []
+            for item in finding.results:
+                url = item.get("url") or item.get("pdf_url") or item.get("paper_url") or ""
+                if url and url in seen_urls:
+                    continue
+                if url:
+                    seen_urls.add(url)
+                deduped.append(item)
+            finding.results = deduped
+        total_after = sum(len(f.results) for f in findings)
+        dupes = total_before - total_after
+
+        console.print(f"  [green]Found {total_after} unique results ({dupes} duplicates removed)[/green]")
         return findings
 
     # ------------------------------------------------------------------
@@ -490,53 +578,62 @@ class ResearchAgent:
     # ------------------------------------------------------------------
 
     async def _deep_fetch(self, findings: list[Finding], output_dir: Path) -> list[Finding]:
-        console.print("\n[bold]Phase 2.7:[/bold] Deep fetching top sources...")
+        console.print("\n[bold]Phase 2.7:[/bold] Deep fetching top sources (parallel)...")
         papers_dir = output_dir / "03_papers"
         papers_dir.mkdir(exist_ok=True)
         code_dir = output_dir / "04_code"
         code_dir.mkdir(exist_ok=True)
 
-        for finding in findings:
-            for item in finding.results[:10]:  # Top 10 per finding
-                # Fetch PDF for papers
-                pdf_url = item.get("pdf_url")
-                if pdf_url:
-                    try:
-                        safe_name = "".join(c if c.isalnum() or c in "-_" else "_"
-                                           for c in (item.get("title", "paper"))[:40])
-                        save_path = str(papers_dir / f"{safe_name}.pdf")
-                        result = await self.registry.execute(
-                            "download_pdf", url=pdf_url, save_path=save_path
+        async def _fetch_one(item: dict) -> None:
+            """Fetch full text for a single item (PDF or GitHub README)."""
+            # Fetch PDF for papers
+            pdf_url = item.get("pdf_url")
+            if pdf_url:
+                try:
+                    safe_name = "".join(c if c.isalnum() or c in "-_" else "_"
+                                       for c in (item.get("title", "paper"))[:40])
+                    save_path = str(papers_dir / f"{safe_name}.pdf")
+                    result = await self.registry.execute(
+                        "download_pdf", url=pdf_url, save_path=save_path
+                    )
+                    if result.success:
+                        parse_result = await self.registry.execute(
+                            "parse_pdf", file_path=save_path, max_chars=6000
                         )
-                        if result.success:
-                            # Parse the PDF and attach content
-                            parse_result = await self.registry.execute(
-                                "parse_pdf", file_path=save_path, max_chars=6000
-                            )
-                            if parse_result.success and parse_result.data:
-                                item["_full_text"] = parse_result.data.get("text", "")
-                                self._log(JournalEntry(
-                                    timestamp=self._now(), phase="search",
-                                    action="deep_fetch_pdf",
-                                    result_summary=f"Parsed {parse_result.data.get('num_pages', 0)} pages: {item.get('title', '')[:50]}",
-                                ))
-                    except Exception as e:
-                        logger.debug("PDF fetch failed for %s: %s", pdf_url, e)
-
-                # Fetch README for GitHub repos
-                repo_url = item.get("url", "")
-                if "github.com" in repo_url and not item.get("_full_text"):
-                    try:
-                        result = await self.registry.execute("inspect_code", url=repo_url)
-                        if result.success and result.data:
-                            item["_full_text"] = result.data.get("content", "")
+                        if parse_result.success and parse_result.data:
+                            item["_full_text"] = parse_result.data.get("text", "")
                             self._log(JournalEntry(
                                 timestamp=self._now(), phase="search",
-                                action="deep_fetch_readme",
-                                result_summary=f"Fetched README: {item.get('name', item.get('title', ''))[:50]}",
+                                action="deep_fetch_pdf",
+                                result_summary=f"Parsed {parse_result.data.get('num_pages', 0)} pages: {item.get('title', '')[:50]}",
                             ))
-                    except Exception as e:
-                        logger.debug("README fetch failed for %s: %s", repo_url, e)
+                except Exception as e:
+                    logger.debug("PDF fetch failed for %s: %s", pdf_url, e)
+
+            # Fetch README for GitHub repos
+            repo_url = item.get("url", "")
+            if "github.com" in repo_url and not item.get("_full_text"):
+                try:
+                    result = await self.registry.execute("inspect_code", url=repo_url)
+                    if result.success and result.data:
+                        item["_full_text"] = result.data.get("content", "")
+                        self._log(JournalEntry(
+                            timestamp=self._now(), phase="search",
+                            action="deep_fetch_readme",
+                            result_summary=f"Fetched README: {item.get('name', item.get('title', ''))[:50]}",
+                        ))
+                except Exception as e:
+                    logger.debug("README fetch failed for %s: %s", repo_url, e)
+
+        # Collect all items to fetch and run in parallel (max 8 concurrent)
+        all_items = [item for f in findings for item in f.results[:10]]
+        sem = asyncio.Semaphore(8)
+
+        async def _limited_fetch(item: dict) -> None:
+            async with sem:
+                await _fetch_one(item)
+
+        await asyncio.gather(*[_limited_fetch(item) for item in all_items], return_exceptions=True)
 
         fetched = sum(1 for f in findings for i in f.results if i.get("_full_text"))
         console.print(f"  [green]Deep fetched {fetched} full texts[/green]")
@@ -573,7 +670,10 @@ class ResearchAgent:
     # Phase 3.7: Hypothesis generation
     # ------------------------------------------------------------------
 
-    async def _generate_hypotheses(self, plan: ResearchPlan, analyses: list[AnalysisResult]) -> dict:
+    async def _generate_hypotheses(
+        self, plan: ResearchPlan, analyses: list[AnalysisResult],
+        research_state: Any | None = None,
+    ) -> dict:
         console.print("\n[bold]Phase 3.7:[/bold] Generating hypotheses...")
 
         analyses_summary = "\n".join(
@@ -583,10 +683,18 @@ class ResearchAgent:
             for a in analyses[:15]
         )
 
+        # Enrich with verified facts from iterative research
+        facts_context = ""
+        if research_state and research_state.fact_bank:
+            facts_context = (
+                "\n\nVerified facts from iterative research (use these to ground hypotheses):\n"
+                + research_state.get_fact_summary(20)
+            )
+
         prompt = self._inject_date(
             HYPOTHESIS_GENERATION
             .replace("{{ topic }}", plan.topic)
-            .replace("{{ analyses_summary }}", analyses_summary[:8000])
+            .replace("{{ analyses_summary }}", analyses_summary[:7000] + facts_context)
         )
 
         raw = await self.llm.generate(prompt, mode=LLMMode.THINKING)
@@ -705,6 +813,7 @@ class ResearchAgent:
         analyses: list[AnalysisResult],
         output_dir: Path,
         hypotheses: dict | None = None,
+        research_state: Any | None = None,
     ) -> Path:
         console.print("\n[bold]Phase 4:[/bold] Synthesizing report...")
 
@@ -723,6 +832,17 @@ class ResearchAgent:
             f"Code: {a.relevant_code}"
             for a in analyses
         )
+
+        # Inject verified facts and pre-embedded citations (Perplexity-style)
+        facts_section = ""
+        citations_section = ""
+        if research_state:
+            fact_summary = research_state.get_fact_summary(30)
+            if fact_summary and fact_summary != "(no facts yet)":
+                facts_section = f"\n\n## Verified Facts (from iterative research)\n{fact_summary}"
+            citation_block = research_state.get_citation_block(8)
+            if citation_block:
+                citations_section = f"\n\n## Source Citations (use these in your report)\n{citation_block}"
 
         plan_summary = "\n".join(
             f"- {sq.question}" for sq in plan.sub_questions
@@ -749,7 +869,7 @@ class ResearchAgent:
             SYNTHESIS
             .replace("{{ topic }}", plan.topic)
             .replace("{{ plan_summary }}", plan_summary)
-            .replace("{{ analyses }}", analyses_text[:10000] + hypotheses_text)
+            .replace("{{ analyses }}", analyses_text[:8000] + facts_section + citations_section + hypotheses_text)
         )
 
         report = await self.llm.generate(prompt, mode=LLMMode.THINKING)
