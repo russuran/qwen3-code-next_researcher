@@ -145,11 +145,53 @@
 
 ---
 
-## Следующие шаги
+## Тест 3: Knowledge Recall (повторный прогон)
 
-1. **Фикс citation format** — стандартизировать `[1]` вместо `[Source [N]]`
-2. **Фикс PROGRESS.md** — обновлять при каждой фазе
-3. **Knowledge recall тест** — повторный прогон того же топика, проверить cache hit rate
-4. **Wrapper generation** — программная генерация вместо LLM (Qwen 8B не справляется)
-5. **Data acquisition** — добавить прямой HuggingFace Hub API search
-6. **Tree search refine** — передавать конкретные hyp_params при refine/merge
+**Цель:** проверить что cache и knowledge layer работают при повторном прогоне того же топика
+
+**Топик:** "RAG reranking techniques: cross-encoder vs ColBERT comparison" (тот же что test-iter4)
+
+### Результаты
+
+| Метрика | Первый прогон | Повторный | Улучшение |
+|---------|--------------|-----------|-----------|
+| Время | ~60 мин | **6 мин** | **10x** |
+| Cache hits | 0 | 1 (analysis) | Работает |
+| Quality overall | 0.59 | **0.737** | +25% |
+| Groundedness | 0.36 | **1.0** | +178% |
+| Coverage | 1.0 | 1.0 | = |
+
+### Что работает
+- **Analysis cache**: EEL paper пропущен (cached), сэкономлено ~30s
+- **Search cache**: 157 cached entries на диске, TTL 1h
+- **Quality выросла**: groundedness 1.0 (все claims с URL), overall 0.737
+
+### Что не работает
+- **DocumentStore** не персистентный (in-memory) — recalled 0 prior chunks
+- Только 1 cache hit из потенциальных ~6 (другие papers не совпали по query)
+
+---
+
+## Исправления после тестов (все реализованы)
+
+| Проблема | Фикс | Статус |
+|----------|------|--------|
+| Citation format `[Source [N]]` | Explicit rules в промпте: только `[N]` | done |
+| PROGRESS.md не обновляется | `_update_progress` на каждой фазе | done |
+| Tree search refine = одинаковые params | REFINE/MERGE/DRAFT получают разные override params | done |
+| Data acquisition не находит датасеты | HuggingFace Hub API прямой поиск | done |
+| Wrapper generation пустой | `_override_params` из tree search вместо LLM | done |
+
+---
+
+## Итоговая оценка
+
+| Компонент | Оценка | Комментарий |
+|-----------|--------|-------------|
+| Research pipeline | **8/10** | ITER-RETGEN работает, 45 фактов, контрарианские гипотезы |
+| Overnight pipeline | **7/10** | Все фазы работают, tree search + reflections |
+| Knowledge persistence | **6/10** | Cache работает (10x ускорение), DocumentStore in-memory |
+| MLX benchmark | **7/10** | Реальный Qwen2.5-7B, различимые val_loss |
+| AST analysis | **8/10** | libcst 340 файлов без ошибок |
+| Data acquisition | **5/10** | HF Hub API работает, но не скачивает автоматически |
+| Report quality | **7/10** | Citations, verified facts, hypotheses — но формат нестабильный |
