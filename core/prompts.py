@@ -338,6 +338,12 @@ Generate 3-5 hypotheses as JSON:
   "uncertainties": ["uncertainty 1", "uncertainty 2"]
 }
 
-Focus on PRACTICAL hypotheses that can be implemented and tested.
+CRITICAL: Each hypothesis must be grounded in SPECIFIC findings from the sources.
+- "based_on" must reference actual source titles from the analyses above
+- "approach" must include specific methods/libraries/techniques mentioned in sources
+- "validation_method" must be concrete and measurable (not "test and see")
+- Prioritize hypotheses where multiple sources converge on a technique
+- Include at least one contrarian hypothesis that challenges mainstream assumptions
+
 Include gaps in current knowledge and uncertainties.
 """
