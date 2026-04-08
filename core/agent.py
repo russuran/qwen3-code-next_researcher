@@ -538,52 +538,70 @@ class ResearchAgent:
     # ------------------------------------------------------------------
 
     async def _filter_relevant(self, topic: str, findings: list[Finding]) -> list[Finding]:
-        console.print("\n[bold]Phase 2.5:[/bold] Filtering by relevance...")
-        filtered_findings: list[Finding] = []
+        console.print("\n[bold]Phase 2.5:[/bold] Filtering by relevance (parallel)...")
 
+        # Collect all items to score
+        all_items: list[tuple[Finding, dict]] = []
         for finding in findings:
-            relevant_items = []
             for item in finding.results:
-                title = item.get("title") or item.get("name") or ""
-                abstract = item.get("abstract") or item.get("description") or ""
+                if item.get("title") or item.get("name"):
+                    all_items.append((finding, item))
 
-                if not title:
-                    continue
+        # Score items in parallel (4 concurrent to avoid overwhelming Ollama)
+        sem = asyncio.Semaphore(4)
+        scored: list[tuple[Finding, dict, int, str]] = []
 
-                prompt = self._inject_date(
-                    RELEVANCE_FILTER
-                    .replace("{{ topic }}", topic)
-                    .replace("{{ title }}", title)
-                    .replace("{{ abstract }}", abstract[:500])
-                )
-
-                try:
+        async def _score_one(finding: Finding, item: dict) -> tuple[Finding, dict, int, str]:
+            title = item.get("title") or item.get("name") or ""
+            abstract = item.get("abstract") or item.get("description") or ""
+            prompt = self._inject_date(
+                RELEVANCE_FILTER
+                .replace("{{ topic }}", topic)
+                .replace("{{ title }}", title)
+                .replace("{{ abstract }}", abstract[:500])
+            )
+            try:
+                async with sem:
                     raw = await self.llm.generate(prompt, mode=LLMMode.FAST)
-                    data = self.planner._extract_json(raw)
-                    score = int(data.get("score", 0))
-                    reason = data.get("reason", "")
+                data = self.planner._extract_json(raw)
+                score = int(data.get("score", 0))
+                reason = data.get("reason", "")
+                self._log(JournalEntry(
+                    timestamp=self._now(), phase="search",
+                    action="relevance_check",
+                    result_summary=f"score={score}/10 {title[:50]} | {reason[:50]}",
+                ))
+                return (finding, item, score, reason)
+            except Exception:
+                return (finding, item, 5, "error-kept")
 
-                    self._log(JournalEntry(
-                        timestamp=self._now(), phase="search",
-                        action="relevance_check",
-                        result_summary=f"score={score}/10 {title[:50]} | {reason[:50]}",
-                    ))
+        results = await asyncio.gather(
+            *[_score_one(f, i) for f, i in all_items],
+            return_exceptions=True,
+        )
 
-                    if score >= 5:
-                        item["_relevance_score"] = score
-                        item["_relevance_reason"] = reason
-                        relevant_items.append(item)
-                    else:
-                        console.print(f"  [dim]Filtered out (score={score}):[/dim] {title[:60]}")
-                except Exception as e:
-                    # On error, keep the item
-                    relevant_items.append(item)
+        # Build filtered findings
+        finding_items: dict[str, list[dict]] = {}
+        for r in results:
+            if isinstance(r, Exception):
+                continue
+            finding, item, score, reason = r
+            title = item.get("title") or item.get("name") or ""
+            if score >= 5:
+                item["_relevance_score"] = score
+                item["_relevance_reason"] = reason
+                key = f"{finding.source}:{finding.query}"
+                finding_items.setdefault(key, []).append(item)
+            else:
+                console.print(f"  [dim]Filtered out (score={score}):[/dim] {title[:60]}")
 
-            if relevant_items:
+        filtered_findings = []
+        for finding in findings:
+            key = f"{finding.source}:{finding.query}"
+            items = finding_items.get(key, [])
+            if items:
                 filtered_findings.append(Finding(
-                    source=finding.source,
-                    query=finding.query,
-                    results=relevant_items,
+                    source=finding.source, query=finding.query, results=items,
                 ))
 
         total_before = sum(len(f.results) for f in findings)
